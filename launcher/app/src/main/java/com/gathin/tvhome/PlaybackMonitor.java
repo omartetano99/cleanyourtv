@@ -23,6 +23,7 @@ public final class PlaybackMonitor extends NotificationListenerService {
     private final Map<MediaController, MediaController.Callback> controllers = new LinkedHashMap<>();
     private MediaSessionManager manager;
     private boolean connected;
+    private final Runnable wakeTick = this::wake;
     private final MediaSessionManager.OnActiveSessionsChangedListener sessions = this::observe;
     private final Runnable saveTick = new Runnable() {
         @Override public void run() {
@@ -33,9 +34,11 @@ public final class PlaybackMonitor extends NotificationListenerService {
     private final BroadcastReceiver power = new BroadcastReceiver() {
         @Override public void onReceive(Context c, Intent intent) {
             if (Intent.ACTION_SCREEN_OFF.equals(intent.getAction()) || Intent.ACTION_SHUTDOWN.equals(intent.getAction())) {
+                handler.removeCallbacks(wakeTick);
                 snapshot(); PlaybackRecovery.screenOff(c);
             } else if (Intent.ACTION_SCREEN_ON.equals(intent.getAction())) {
-                handler.postDelayed(PlaybackMonitor.this::wake, 1500);
+                handler.removeCallbacks(wakeTick);
+                handler.postDelayed(wakeTick, 1500);
             }
         }
     };
@@ -72,13 +75,22 @@ public final class PlaybackMonitor extends NotificationListenerService {
         for (MediaController c : controllers.keySet()) {
             if (!pkg.equals(c.getPackageName())) continue;
             PlaybackState state = c.getPlaybackState();
-            if (state == null || state.getState() == PlaybackState.STATE_NONE || state.getState() == PlaybackState.STATE_STOPPED || state.getState() == PlaybackState.STATE_ERROR) continue;
+            if (!canResumeSession(state, c.getMetadata())) continue;
             // Standby normally leaves the original player alive. Do not reopen or reset its position.
             if (PlaybackRecovery.prefs(this).getBoolean("playing", true)) c.getTransportControls().play();
             PlaybackRecovery.consumed(this);
             return;
         }
         PlaybackRecovery.resume(this);
+    }
+    static boolean canResumeSession(PlaybackState state, MediaMetadata metadata) {
+        if (state == null || metadata == null) return false;
+        if (state.getState() != PlaybackState.STATE_PLAYING && state.getState() != PlaybackState.STATE_PAUSED) return false;
+        // An empty/buffering session can survive after the player's surface has gone.
+        // Treat it as needing a fresh launch instead of consuming recovery on a black screen.
+        if (metadata.getLong(MediaMetadata.METADATA_KEY_DURATION) <= 0 && state.getPosition() <= 0) return false;
+        return state.getState() == PlaybackState.STATE_PLAYING
+            || (state.getActions() & (PlaybackState.ACTION_PLAY | PlaybackState.ACTION_PLAY_PAUSE)) != 0;
     }
     @Override public void onListenerDisconnected() { disconnect(); super.onListenerDisconnected(); }
     @Override public void onDestroy() { disconnect(); super.onDestroy(); }

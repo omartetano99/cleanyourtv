@@ -33,8 +33,22 @@ public class VideoRowAdapter extends RecyclerView.Adapter<VideoRowAdapter.Holder
         this.ctx = ctx; this.row = row; this.rowIndex = rowIndex; this.listener = listener;
     }
     void setItems(List<FeedLoader.Video> videos) {
-        items = videos == null ? new ArrayList<>() : new ArrayList<>(videos);
-        notifyDataSetChanged();
+        List<FeedLoader.Video> old = items;
+        List<FeedLoader.Video> next = videos == null ? new ArrayList<>() : new ArrayList<>(videos);
+        androidx.recyclerview.widget.DiffUtil.DiffResult diff = androidx.recyclerview.widget.DiffUtil.calculateDiff(
+            new androidx.recyclerview.widget.DiffUtil.Callback() {
+                @Override public int getOldListSize() { return old.size(); }
+                @Override public int getNewListSize() { return next.size(); }
+                @Override public boolean areItemsTheSame(int a, int b) { return old.get(a).identity().equals(next.get(b).identity()); }
+                @Override public boolean areContentsTheSame(int a, int b) {
+                    FeedLoader.Video x = old.get(a), y = next.get(b);
+                    return java.util.Objects.equals(x.title, y.title) && java.util.Objects.equals(x.thumb, y.thumb)
+                        && java.util.Objects.equals(x.rating, y.rating) && java.util.Objects.equals(x.genres, y.genres)
+                        && x.bannerIndex == y.bannerIndex && x.positionMs == y.positionMs && x.durationMs == y.durationMs;
+                }
+            });
+        items = next;
+        diff.dispatchUpdatesTo(this);
     }
     String keyAt(int index) { return index >= 0 && index < items.size() ? items.get(index).identity() : null; }
     int positionOf(String key) {
