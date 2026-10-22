@@ -64,7 +64,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         }
     }
 
-    static final float FOCUS_SCALE = 1.10f;
+    static final float FOCUS_SCALE = 1.04f;
 
     private final Context ctx;
     private final TileListener listener;
@@ -126,9 +126,10 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
     public void onBindViewHolder(@NonNull Holder h, int position) {
         Entry e = items.get(position);
         h.name.setText(e.label);
-        h.name.setVisibility(position < dockSize ? View.INVISIBLE : View.VISIBLE);   // the dock has no labels
+        h.name.setVisibility(View.VISIBLE);
+        h.card.setContentDescription(e.label);
         boolean focused = h.card.isFocused();   // a rebind after reload() can hit the focused tile
-        h.name.setAlpha(focused ? 1f : 0f);
+        h.name.setAlpha(1f);
         h.card.setScaleX(focused ? FOCUS_SCALE : 1f);
         h.card.setScaleY(focused ? FOCUS_SCALE : 1f);
         if (e.banner != null) {
@@ -163,6 +164,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED);
         try {
             ctx.startActivity(i);
+            PlaybackRecovery.launched(ctx, i, e.label);
         } catch (Exception ex) {
             Toast.makeText(ctx, ctx.getString(R.string.cant_open, e.label), Toast.LENGTH_SHORT).show();
         }
@@ -262,7 +264,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
             name = v.findViewById(R.id.name);
 
             final float density = v.getResources().getDisplayMetrics().density;
-            final float radius = density * 16f;
+            final float radius = density * 12f;
             card.setOutlineProvider(new ViewOutlineProvider() {
                 @Override
                 public void getOutline(View view, Outline outline) {
@@ -273,8 +275,15 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
 
             card.setOnKeyListener((view, keyCode, event) -> {
                 if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
-                if (keyCode != KeyEvent.KEYCODE_DPAD_UP && keyCode != KeyEvent.KEYCODE_DPAD_DOWN) return false;
                 int pos = getBindingAdapterPosition();
+                if (pos == RecyclerView.NO_POSITION) return false;
+                if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    RecyclerView rv = (RecyclerView) itemView.getParent();
+                    int target = Math.max(0, Math.min(rv.getAdapter().getItemCount() - 1, pos + (keyCode == KeyEvent.KEYCODE_DPAD_LEFT ? -1 : 1)));
+                    FocusRequests.focus(rv, target);
+                    return true;
+                }
+                if (keyCode != KeyEvent.KEYCODE_DPAD_UP && keyCode != KeyEvent.KEYCODE_DPAD_DOWN) return false;
                 return listener != null && pos != RecyclerView.NO_POSITION && listener.onTileVerticalKey(pos, keyCode);
             });
 
@@ -284,9 +293,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
                         .setDuration(focused ? 260 : 180)
                         .setInterpolator(new OvershootInterpolator(focused ? 1.6f : 0f))
                         .start();
-                name.animate().alpha(focused ? 1f : 0f)
-                        .translationY(focused ? density * 4f : -density * 6f)
-                        .setDuration(220).start();
+                name.setTextColor(v.getContext().getColor(focused ? R.color.home_accent : R.color.home_text));
                 int pos = getBindingAdapterPosition();
                 if (focused && listener != null && pos != RecyclerView.NO_POSITION) {
                     listener.onTileFocused(pos, view);

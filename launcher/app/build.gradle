@@ -10,8 +10,9 @@ android {
         applicationId 'com.gathin.tvhome'
         minSdk 26
         targetSdk 29
-        versionCode 2
-        versionName '2.0'
+        versionCode 11
+        versionName '2.9'
+        testInstrumentationRunner 'com.gathin.tvhome.LauncherRegression'
     }
 
     buildTypes {

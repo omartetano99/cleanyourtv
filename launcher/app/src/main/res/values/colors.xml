@@ -1,0 +1,6 @@
+<resources>
+    <color name="home_text">#F5F4EF</color>
+    <color name="home_muted">#A7B4B7</color>
+    <color name="home_accent">#9CE8D5</color>
+    <color name="home_surface">#202C30</color>
+</resources>

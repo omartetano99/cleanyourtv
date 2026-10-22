@@ -1,0 +1,16 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- three stacked rows: the content-row manager glyph -->
+    <path
+        android:pathData="M4,5h10a1.4,1.4 0 0,1 0,2.8H4A1.4,1.4 0 0,1 4,5z"
+        android:fillColor="#E9FFFFFF" />
+    <path
+        android:pathData="M4,10.6h16a1.4,1.4 0 0,1 0,2.8H4A1.4,1.4 0 0,1 4,10.6z"
+        android:fillColor="#E9FFFFFF" />
+    <path
+        android:pathData="M4,16.2h6a1.4,1.4 0 0,1 0,2.8H4A1.4,1.4 0 0,1 4,16.2z"
+        android:fillColor="#E9FFFFFF" />
+</vector>

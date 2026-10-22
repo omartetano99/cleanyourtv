@@ -7,20 +7,39 @@
 
     <!-- Apps pinned to the dock row at the bottom, in this order. Missing apps are skipped. -->
     <string-array name="dock_apps">
-        <item>com.netflix.ninja</item>
-        <item>com.amazon.amazonvideo.livingroom</item>
-        <item>com.google.android.youtube.tv</item>
-        <item>in.startv.hotstar</item>
+        <item>org.smarttube.stable</item>
+        <item>com.stremio.one</item>
+        <item>com.shabakaty.cbox.cinemana</item>
+        <item>app.oneiraq.tv</item>
     </string-array>
 
     <!-- Apps never shown as tiles (e.g. the Live TV app, which the Inputs menu already covers). -->
     <string-array name="hidden_apps">
-        <item>com.mediatek.wwtv.tvcenter</item>
-        <item>com.mitv.gallery</item>
+        <item>com.cultraview.livetv</item>
+        <item>eu.chainfire.tv.sideloadlauncher</item>
     </string-array>
 
     <!-- The TV's Live TV / tuner app, offered at the end of the Inputs menu. Leave empty to omit. -->
-    <string name="live_tv_package" translatable="false">com.mediatek.wwtv.tvcenter</string>
+    <string name="live_tv_package" translatable="false">com.cultraview.livetv</string>
+
+    <!-- "Live channels"-style row above the dock. Entries: Label|package, Label|full/class (ComponentName),
+         Label|https://... (opens as a video URL), or Label|livetv (the tuner input's channel stream).
+         Missing apps are skipped; delete the whole array or leave it empty to remove the row. -->
+    <string-array name="channels">
+        <item>Live TV|livetv</item>
+        <item>CBox Cinema|com.shabakaty.cbox.cinemana</item>
+        <item>oneiraq.tv|app.oneiraq.tv</item>
+        <item>Downloader|com.esaba.downloader</item>
+    </string-array>
+
+    <!-- App that plays video rows' links (set to an installed package; empty = system chooser). -->
+    <string name="video_player_package" translatable="false">org.smarttube.stable</string>
+
+    <!-- Google-TV-style video rows. Entries: Row Title|RSS or YouTube feed URL.
+         YouTube channel: https://www.youtube.com/feeds/videos.xml?channel_id=UCxxxx
+         YouTube playlist: https://www.youtube.com/feeds/videos.xml?playlist_id=PLxxxx
+         Cards play in video_player_package (SmartTube) via deep link; feeds cache for an hour. -->
+    <string-array name="content_rows" />
 
     <!-- Tiles per row in the grid; the dock always has this many slots. -->
     <integer name="columns">4</integer>

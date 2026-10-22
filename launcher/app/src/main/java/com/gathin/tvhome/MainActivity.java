@@ -5,10 +5,10 @@ import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
+import android.database.ContentObserver;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.drawable.ColorDrawable;
-import android.graphics.drawable.GradientDrawable;
 import android.media.tv.TvContract;
 import android.media.tv.TvInputInfo;
 import android.media.tv.TvInputManager;
@@ -25,354 +25,493 @@ import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
-import android.view.animation.AnimationUtils;
-import android.view.animation.LayoutAnimationController;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.PopupWindow;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
-
 import androidx.annotation.NonNull;
-import androidx.dynamicanimation.animation.DynamicAnimation;
-import androidx.dynamicanimation.animation.SpringAnimation;
-import androidx.dynamicanimation.animation.SpringForce;
-import androidx.recyclerview.widget.GridLayoutManager;
+import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
-
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Collections;
 import java.util.List;
 
-/**
- * tvOS style home: black, a pinned dock row, an app grid, and one glass highlight that springs between tiles.
- */
+/** A persistent header and one vertically scrolling collection of remote-friendly shelves. */
 public class MainActivity extends Activity implements AppAdapter.TileListener {
-
-    /** Tiles per row and dock slots (res/values/config.xml, columns). Set in onCreate. */
     static int COLUMNS = 4;
     private static final long MINUTE_MS = 60_000L;
     private String liveTvPkg;
-
     private AppAdapter adapter;
     private RecyclerView grid;
     private FrameLayout root;
-    private GlassView glass;
-    private View ambient;
-    private TextView heroName;
-    private GradientDrawable ambientGlow;
-    private int ambientColor;
-    private boolean heroShown;
-    private TextView greeting;
-    private TextView btnWifi;
-    private SpringAnimation springX, springY;
-    private float glassTargetX, glassTargetY;
-    private boolean glassShown;
-    // Static so they survive the activity being destroyed while another app is open (low-memory TVs,
-    // or Developer options → "Don't keep activities"); they only reset when the process dies.
-    private static int lastFocused = 0;
-    /** App of the last focused tile, so focus follows it when the app list changes. */
-    private static String lastFocusedKey;
+    private TextView greeting, btnWifi, contentStatus;
     private float density;
-
+    private ChannelRowAdapter channelAdapter;
+    private RecyclerView channelsRow;
+    private View channelBlockView;
+    private ScrollView videoWrap;
+    private LinearLayout videoRowsContainer, cinemanaShelf;
+    private final List<View> videoRowViews = new ArrayList<>();
+    private FeedLoader feedLoader;
+    private ProviderRows providerRows;
+    private CinemanaRows cinemanaRows;
+    private List<FeedLoader.Row> cinemanaRowData;
+    private List<FeedLoader.Row> feedRowData, providerRowData;
+    private final List<FeedLoader.Row> visibleRows = new ArrayList<>();
+    private final List<VideoRowAdapter> videoRowAdapters = new ArrayList<>();
     private final Handler handler = new Handler(Looper.getMainLooper());
-    /** Refreshes the network pill when the connection changes: at boot Wi-Fi often connects after Home is shown. */
-    private final ConnectivityManager.NetworkCallback networkCallback = new ConnectivityManager.NetworkCallback() {
-        @Override
-        public void onAvailable(@NonNull Network network) {
-            handler.post(MainActivity.this::updateWifiLabel);
-        }
-
-        @Override
-        public void onLost(@NonNull Network network) {
-            handler.post(MainActivity.this::updateWifiLabel);
+    private boolean resumed, restoring, pendingVideoRestore, observerRegistered;
+    private int refreshGeneration;
+    private boolean recoveryPending;
+    private final Runnable resumePlayback = () -> {
+        recoveryPending = false;
+        if (resumed && !PlaybackRecovery.resume(this)) PlaybackRecovery.stayHome(this);
+    };
+    private String renderedFingerprint;
+    private String focusZone = "apps", lastAppKey, lastRowKey, lastVideoKey;
+    private int lastAppIndex, lastVideoIndex;
+    private final Runnable providerRefresh = this::refreshContentRows;
+    private final ContentObserver contentObserver = new ContentObserver(handler) {
+        @Override public void onChange(boolean selfChange) {
+            handler.removeCallbacks(providerRefresh);
+            handler.postDelayed(providerRefresh, 700);
         }
     };
+    private final ConnectivityManager.NetworkCallback networkCallback = new ConnectivityManager.NetworkCallback() {
+        @Override public void onAvailable(@NonNull Network network) { handler.post(MainActivity.this::updateWifiLabel); }
+        @Override public void onLost(@NonNull Network network) { handler.post(MainActivity.this::updateWifiLabel); }
+    };
     private final Runnable minuteTick = new Runnable() {
-        @Override
-        public void run() {
+        @Override public void run() {
             updateGreeting();
             updateWifiLabel();
+            refreshContentRows();
             handler.postDelayed(this, MINUTE_MS);
         }
     };
 
-    @Override
-    protected void onCreate(Bundle savedInstanceState) {
+    @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         density = getResources().getDisplayMetrics().density;
         COLUMNS = Math.max(1, getResources().getInteger(R.integer.columns));
         liveTvPkg = getString(R.string.live_tv_package).trim();
-
         root = findViewById(R.id.root);
-        glass = findViewById(R.id.glass);
-        ambient = findViewById(R.id.ambient);
-        heroName = findViewById(R.id.heroName);
-        ambientGlow = new GradientDrawable();
-        ambientGlow.setGradientType(GradientDrawable.RADIAL_GRADIENT);
-        ambientGlow.setGradientCenter(0.32f, 0.42f);
-        ambient.setBackground(ambientGlow);
-        ambient.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) ->
-                ambientGlow.setGradientRadius((r - l) * 0.62f));
         greeting = findViewById(R.id.greeting);
         btnWifi = findViewById(R.id.btnWifi);
-
+        contentStatus = findViewById(R.id.contentStatus);
+        videoWrap = findViewById(R.id.videoRowsWrap);
+        videoRowsContainer = findViewById(R.id.videoRows);
+        cinemanaShelf = findViewById(R.id.cinemanaShelf);
         grid = findViewById(R.id.grid);
-        grid.setLayoutManager(new GridLayoutManager(this, COLUMNS));
-        grid.setHasFixedSize(true);
+        grid.setLayoutManager(new LinearLayoutManager(this, RecyclerView.HORIZONTAL, false));
         grid.setItemAnimator(null);
-        grid.addItemDecoration(new DockDecoration(COLUMNS, density));
-        grid.setLayoutAnimation(new LayoutAnimationController(
-                AnimationUtils.loadAnimation(this, R.anim.tile_enter), 0.06f));
+        grid.setNestedScrollingEnabled(false);
         adapter = new AppAdapter(this, this, COLUMNS);
         grid.setAdapter(adapter);
+        feedLoader = new FeedLoader(this);
+        providerRows = new ProviderRows();
+        cinemanaRows = new CinemanaRows(this);
+        focusZone = rowsPrefs().getString("focus_zone", "apps");
+        lastAppKey = rowsPrefs().getString("focus_app", null);
+        lastRowKey = rowsPrefs().getString("focus_row", null);
+        lastVideoKey = rowsPrefs().getString("focus_video", null);
+        lastVideoIndex = rowsPrefs().getInt("focus_lane", 0);
 
-        // tvOS layout: push the dock row to the bottom of the screen; the grid hides below until you press Down.
-        grid.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
-            int h = b - t;
-            int dockRow = (int) ((145 + 6 + 12) * density);   // item height plus DockDecoration offsets
-            int want = Math.max(0, h - dockRow - (int) (30 * density));
-            if (grid.getPaddingTop() != want) {
-                grid.setPadding(grid.getPaddingLeft(), want, grid.getPaddingRight(), grid.getPaddingBottom());
-            }
+        View inputs = findViewById(R.id.btnInputs), settings = findViewById(R.id.btnSettings), rows = findViewById(R.id.btnRows);
+        inputs.setOnClickListener(v -> showInputs());
+        btnWifi.setOnClickListener(v -> {
+            Intent network = new Intent(Settings.ACTION_WIRELESS_SETTINGS);
+            if (network.resolveActivity(getPackageManager()) == null) network = new Intent(Settings.ACTION_WIFI_SETTINGS);
+            open(network);
         });
-
-        // Keep the glass glued to its tile while the grid scrolls.
-        grid.addOnScrollListener(new RecyclerView.OnScrollListener() {
-            @Override
-            public void onScrolled(@NonNull RecyclerView rv, int dx, int dy) {
-                if (!glassShown) return;
-                glassTargetY -= dy;
-                if (springY.isRunning()) springY.animateToFinalPosition(glassTargetY);
-                else glass.setTranslationY(glassTargetY);
-            }
-        });
-
-        // Liquid feel: soft springs on the highlight's position.
-        springX = new SpringAnimation(glass, DynamicAnimation.TRANSLATION_X);
-        springY = new SpringAnimation(glass, DynamicAnimation.TRANSLATION_Y);
-        for (SpringAnimation s : new SpringAnimation[]{springX, springY}) {
-            s.setSpring(new SpringForce().setStiffness(260f).setDampingRatio(0.58f));
+        settings.setOnClickListener(v -> open(new Intent(Settings.ACTION_SETTINGS)));
+        rows.setOnClickListener(v -> showRowsManager());
+        View[] buttons = {inputs, btnWifi, rows, settings};
+        for (int j = 0; j < buttons.length; j++) {
+            final int index = j;
+            buttons[j].setOnKeyListener((view, key, event) -> {
+                if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
+                if (key == KeyEvent.KEYCODE_DPAD_UP) return true;
+                if (key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT) {
+                    int next = Math.max(0, Math.min(buttons.length - 1, index + (key == KeyEvent.KEYCODE_DPAD_LEFT ? -1 : 1)));
+                    buttons[next].requestFocus();
+                    return true;
+                }
+                if (key == KeyEvent.KEYCODE_DPAD_DOWN) {
+                    if (bannerRowIndex() >= 0) focusVideo(bannerRowIndex(), lastVideoIndex);
+                    else if (adapter.getItemCount() > 0) focusTile(lastAppIndex);
+                    else if (!videoRowAdapters.isEmpty()) focusVideo(0, 0);
+                    else if (channelAdapter.getItemCount() > 0) focusChannel(0);
+                    return true;
+                }
+                return false;
+            });
+            buttons[j].setOnFocusChangeListener((v, focused) -> {
+                v.animate().scaleX(focused ? 1.04f : 1f).scaleY(focused ? 1.04f : 1f).setDuration(160).start();
+                if (focused && !restoring) { focusZone = "top"; videoWrap.smoothScrollTo(0, 0); }
+            });
         }
-
-        View btnInputs = findViewById(R.id.btnInputs);
-        View btnSettings = findViewById(R.id.btnSettings);
-        btnInputs.setOnClickListener(v -> showInputs());
-        btnWifi.setOnClickListener(v -> open(new Intent(Settings.ACTION_WIFI_SETTINGS)));
-        btnSettings.setOnClickListener(v -> open(new Intent(Settings.ACTION_SETTINGS)));
-
-        // Keep focus on the top bar at its ends and at the top: Android's focus finder would otherwise
-        // jump to a tile far below when there is nothing in that direction.
-        View.OnKeyListener pillKeys = (v, keyCode, event) -> {
-            if (event.getAction() != KeyEvent.ACTION_DOWN) return false;
-            if (keyCode == KeyEvent.KEYCODE_DPAD_UP) return true;
-            if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT && v.getId() == R.id.btnInputs) return true;
-            return keyCode == KeyEvent.KEYCODE_DPAD_RIGHT && v.getId() == R.id.btnSettings;
-        };
-        btnInputs.setOnKeyListener(pillKeys);
-        btnWifi.setOnKeyListener(pillKeys);
-        btnSettings.setOnKeyListener(pillKeys);
-
-        // Hide the glass when focus leaves the tiles.
-        getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener((oldF, newF) -> {
-            boolean onTile = newF != null && newF.getId() == R.id.card;
-            if (!onTile) hideGlass();
+        channelBlockView = findViewById(R.id.channelRow);
+        channelsRow = channelBlockView.findViewById(R.id.channels);
+        channelAdapter = new ChannelRowAdapter(this, new ChannelRowAdapter.Listener() {
+            @Override public void onChannelFocused(View card, View itemView, String key) {
+                if (!restoring) focusZone = "channels";
+                revealShelf(channelBlockView);
+            }
+            @Override public boolean onKey(int key, int index) {
+                if (key == KeyEvent.KEYCODE_DPAD_UP) {
+                    if (firstRegularRow() >= 0) focusVideo(videoRowAdapters.size() - 1, index);
+                    else focusTile(lastAppIndex);
+                    return true;
+                }
+                return key == KeyEvent.KEYCODE_DPAD_DOWN;
+            }
         });
-
+        channelsRow.setLayoutManager(new LinearLayoutManager(this, RecyclerView.HORIZONTAL, false));
+        channelsRow.setNestedScrollingEnabled(false);
+        channelsRow.setItemAnimator(null);
+        channelsRow.setAdapter(channelAdapter);
+        channelAdapter.setRow(channelsRow);
+        channelBlockView.setVisibility(channelAdapter.getItemCount() == 0 ? View.GONE : View.VISIBLE);
         ConnectivityManager cm = getSystemService(ConnectivityManager.class);
         if (cm != null) cm.registerDefaultNetworkCallback(networkCallback);
+        findViewById(R.id.topBar).setAlpha(0f);
+        findViewById(R.id.topBar).animate().alpha(1f).setDuration(320).start();
     }
 
-    @Override
-    protected void onResume() {
+    @Override protected void onResume() {
         super.onResume();
-        glassShown = false;
-        glass.setAlpha(0f);
-        heroShown = false;
-        heroName.setAlpha(0f);
-        ambient.setAlpha(0f);
-        // Read these before reload(): rebinding can move focus to the first tile and overwrite them.
-        final String returnKey = lastFocusedKey;
-        final int returnSlot = lastFocused;
+        resumed = true;
+        PlaybackRecovery.homeVisible = true;
+        PlaybackRecovery.initialize(this);
+        if (getSystemService(android.os.PowerManager.class).isInteractive()) {
+            recoveryPending = PlaybackRecovery.due(this);
+            if (recoveryPending) {
+                Toast.makeText(this, R.string.resuming_playback, Toast.LENGTH_LONG).show();
+                handler.postDelayed(resumePlayback, 2000);
+            } else PlaybackRecovery.stayHome(this);
+        }
+        pendingVideoRestore = "video".equals(focusZone);
+        final String returnApp = lastAppKey;
+        restoring = true;
         adapter.reload();
-        grid.scheduleLayoutAnimation();
+        restoring = false;
         updateGreeting();
         updateWifiLabel();
-        handler.postDelayed(minuteTick, MINUTE_MS);
-
-        // Return to the app we left from, or the same slot if that app is gone. Always refocus: after
-        // reload() the view that holds focus may no longer show the app it had.
-        grid.post(() -> {
-            int pos = adapter.positionOf(returnKey);
-            focusTile(pos >= 0 ? pos : returnSlot);
-        });
-    }
-
-    @Override
-    protected void onPause() {
-        super.onPause();
         handler.removeCallbacks(minuteTick);
+        handler.postDelayed(minuteTick, MINUTE_MS);
+        if (!observerRegistered) {
+            try {
+                getContentResolver().registerContentObserver(TvContract.Channels.CONTENT_URI, true, contentObserver);
+                getContentResolver().registerContentObserver(TvContract.PreviewPrograms.CONTENT_URI, true, contentObserver);
+                getContentResolver().registerContentObserver(TvContract.WatchNextPrograms.CONTENT_URI, true, contentObserver);
+                observerRegistered = true;
+            } catch (SecurityException e) {
+                getContentResolver().unregisterContentObserver(contentObserver);
+            }
+        }
+        if (!pendingVideoRestore) grid.post(() -> {
+            int position = adapter.positionOf(returnApp);
+            focusTile(position >= 0 ? position : lastAppIndex);
+        });
+        refreshContentRows();
     }
 
-    @Override
-    protected void onDestroy() {
+    @Override protected void onPause() {
+        super.onPause();
+        resumed = false;
+        PlaybackRecovery.homeVisible = false;
+        handler.removeCallbacks(resumePlayback);
+        recoveryPending = false;
+        ++refreshGeneration;
+        handler.removeCallbacks(minuteTick);
+        handler.removeCallbacks(providerRefresh);
+        if (observerRegistered) { getContentResolver().unregisterContentObserver(contentObserver); observerRegistered = false; }
+        rowsPrefs().edit().putString("focus_zone", focusZone).putString("focus_app", lastAppKey)
+            .putString("focus_row", lastRowKey).putString("focus_video", lastVideoKey).putInt("focus_lane", lastVideoIndex).apply();
+    }
+
+    @Override protected void onDestroy() {
         super.onDestroy();
+        handler.removeCallbacksAndMessages(null);
+        feedLoader.close();
+        providerRows.close();
+        cinemanaRows.close();
         ConnectivityManager cm = getSystemService(ConnectivityManager.class);
         if (cm != null) cm.unregisterNetworkCallback(networkCallback);
     }
 
-    @Override
-    public void onBackPressed() {
-        // Home screen: Back goes nowhere.
-    }
-
-    // ---- glass highlight -------------------------------------------------------------------------
-
-    @Override
-    public void onTileFocused(int position, View card) {
-        lastFocused = position;
-        lastFocusedKey = adapter.keyAt(position);
-        // Tile rect in root coordinates, using layout positions (ignores the scale animation).
-        Rect r = new Rect(0, 0, card.getWidth(), card.getHeight());
-        root.offsetDescendantRectToMyCoords(card, r);
-        float pad = 6f * density;        // matches GlassView's glow inset
-        float w = card.getWidth() * AppAdapter.FOCUS_SCALE + 2 * pad;
-        float h = card.getHeight() * AppAdapter.FOCUS_SCALE + 2 * pad;
-        float x = r.exactCenterX() - w / 2f;
-        float y = r.exactCenterY() - h / 2f;
-
-        ViewGroup.LayoutParams lp = glass.getLayoutParams();
-        if (lp.width != (int) w || lp.height != (int) h) {
-            lp.width = (int) w;
-            lp.height = (int) h;
-            glass.setLayoutParams(lp);
-            glass.setRadius(16f * density * AppAdapter.FOCUS_SCALE + pad);
+    @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        if (recoveryPending && event.getAction() == KeyEvent.ACTION_DOWN) {
+            handler.removeCallbacks(resumePlayback);
+            recoveryPending = false;
+            PlaybackRecovery.stayHome(this);
+            if (event.getKeyCode() == KeyEvent.KEYCODE_BACK) return true;
         }
-        glassTargetX = x;
-        glassTargetY = y;
-        if (!glassShown) {
-            springX.cancel();
-            springY.cancel();
-            glass.setTranslationX(x);
-            glass.setTranslationY(y);
-            glass.animate().alpha(1f).setDuration(180).start();
-            glassShown = true;
-        } else {
-            springX.animateToFinalPosition(x);
-            springY.animateToFinalPosition(y);
+        return super.dispatchKeyEvent(event);
+    }
+
+    @Override public void onBackPressed() { focusTile(lastAppIndex); }
+
+    @Override public void onRequestPermissionsResult(int code, @NonNull String[] permissions, @NonNull int[] results) {
+        super.onRequestPermissionsResult(code, permissions, results);
+        if (code == 42) refreshContentRows();
+    }
+
+    @Override public void onTileFocused(int position, View card) {
+        if (restoring || pendingVideoRestore) return;
+        focusZone = "apps";
+        pendingVideoRestore = false;
+        lastAppIndex = position;
+        lastAppKey = adapter.keyAt(position);
+        revealApps();
+    }
+
+    @Override public boolean onTileVerticalKey(int position, int key) {
+        if (key == KeyEvent.KEYCODE_DPAD_UP) {
+            if (bannerRowIndex() >= 0) focusVideo(bannerRowIndex(), 0);
+            else findViewById(R.id.btnInputs).requestFocus();
+            return true;
         }
-        View item = (View) card.getParent();
-        if (position < COLUMNS) {
-            // Dock: park it at the bottom of the screen and show the top shelf for this app.
-            int decoratedTop = item.getTop() - (int) (6 * density);
-            int dy = decoratedTop - grid.getPaddingTop();
-            if (Math.abs(dy) > 1) grid.smoothScrollBy(0, dy);
-            showHero(position, r.top - dy);
-        } else {
-            hideHero();
-            // Scroll just enough so the whole glass (not only the tile) is visible.
-            Rect want = new Rect(0, -(int) pad * 2, item.getWidth(), item.getHeight() + (int) pad);
-            grid.requestChildRectangleOnScreen(item, want, false);
+        if (key == KeyEvent.KEYCODE_DPAD_DOWN) {
+            if (firstRegularRow() >= 0) focusVideo(firstRegularRow(), Math.min(position, 3));
+            else if (channelBlockView.getVisibility() == View.VISIBLE) focusChannel(position);
+            return true;
         }
-    }
-
-    // ---- top shelf -------------------------------------------------------------------------------
-
-    private void showHero(int position, float dockTopInRoot) {
-        String label = adapter.labelAt(position);
-        int color = adapter.ambientColorAt(position);
-        float y = dockTopInRoot - 14 * density - 26 * density - heroName.getHeight();
-        boolean changed = !label.contentEquals(heroName.getText());
-
-        if (!heroShown) {
-            heroName.setText(label);
-            heroName.setY(y);
-            heroName.setTranslationX(0f);
-            heroName.animate().alpha(1f).setDuration(260).start();
-            setAmbient(color);
-            ambient.animate().alpha(1f).setDuration(600).start();
-            heroShown = true;
-        } else if (changed) {
-            heroName.animate().alpha(0f).translationX(-12 * density).setDuration(120).withEndAction(() -> {
-                heroName.setText(label);
-                heroName.setY(y);
-                heroName.setTranslationX(12 * density);
-                heroName.animate().alpha(1f).translationX(0f).setDuration(200).start();
-            }).start();
-            if (color != ambientColor) {
-                ambient.animate().alpha(0.35f).setDuration(200).withEndAction(() -> {
-                    setAmbient(color);
-                    ambient.animate().alpha(1f).setDuration(500).start();
-                }).start();
-            }
-        } else {
-            heroName.setY(y);
-        }
-    }
-
-    private void setAmbient(int color) {
-        ambientColor = color;
-        int c = color & 0x00FFFFFF;
-        ambientGlow.setColors(new int[]{0x5C000000 | c, 0x26000000 | c, 0x00000000 | c});
-    }
-
-    private void hideHero() {
-        if (!heroShown) return;
-        heroShown = false;
-        heroName.animate().alpha(0f).setDuration(160).start();
-        ambient.animate().alpha(0f).setDuration(300).start();
-    }
-
-    private void hideGlass() {
-        if (!glassShown) return;
-        glassShown = false;
-        glass.animate().alpha(0f).setDuration(160).start();
-    }
-
-    // ---- navigation ------------------------------------------------------------------------------
-
-    @Override
-    public boolean onTileVerticalKey(int position, int keyCode) {
-        int count = adapter.getItemCount();
-        int target;
-        if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-            if (position < COLUMNS) return false;          // dock row: let focus move to the top bar
-            target = position - COLUMNS;
-        } else {
-            int lastRowStart = ((count - 1) / COLUMNS) * COLUMNS;
-            if (position >= lastRowStart) return true;     // already on the last row: stay put
-            target = Math.min(position + COLUMNS, count - 1);
-        }
-        focusTile(target);
-        return true;
+        return false;
     }
 
     private void focusTile(int position) {
-        if (adapter.getItemCount() == 0) return;
-        final int pos = Math.max(0, Math.min(position, adapter.getItemCount() - 1));
-        RecyclerView.ViewHolder vh = grid.findViewHolderForAdapterPosition(pos);
-        if (vh != null) {
-            View card = vh.itemView.findViewById(R.id.card);
-            // Already focused (e.g. back from an app): no focus change fires, so restore the glass by hand.
-            if (card.isFocused()) onTileFocused(pos, card);
-            else card.requestFocus();
-            return;
+        pendingVideoRestore = false;
+        focusZone = "apps";
+        if (adapter.getItemCount() == 0) { findViewById(R.id.btnInputs).requestFocus(); return; }
+        FocusRequests.focus(grid, Math.max(0, Math.min(position, adapter.getItemCount() - 1)));
+        revealApps();
+    }
+    private void focusChannel(int index) {
+        if (channelAdapter.getItemCount() > 0) FocusRequests.focus(channelsRow, Math.max(0, Math.min(index, channelAdapter.getItemCount() - 1)));
+    }
+    private int bannerRowIndex() {
+        for (int i = 0; i < visibleRows.size(); i++) if (CinemanaRows.KEY.equals(visibleRows.get(i).key)) return i;
+        return -1;
+    }
+    private int firstRegularRow() {
+        for (int i = 0; i < visibleRows.size(); i++) if (!CinemanaRows.KEY.equals(visibleRows.get(i).key)) return i;
+        return -1;
+    }
+    private void revealApps() {
+        if (bannerRowIndex() < 0) { revealShelf(findViewById(R.id.appsCaption)); return; }
+        if (restoring) return;
+        Rect rect = new Rect(0, 0, grid.getWidth(), grid.getHeight());
+        ((ViewGroup) videoWrap.getChildAt(0)).offsetDescendantRectToMyCoords(grid, rect);
+        // Keep the banners in view whenever the dock fits beneath them.
+        videoWrap.smoothScrollTo(0, Math.max(0, rect.bottom - videoWrap.getHeight() + (int) (8 * density)));
+    }
+    private void revealShelf(View shelf) {
+        if (restoring || shelf == null) return;
+        Rect rect = new Rect(0, 0, shelf.getWidth(), shelf.getHeight());
+        ((ViewGroup) videoWrap.getChildAt(0)).offsetDescendantRectToMyCoords(shelf, rect);
+        int target = Math.max(0, rect.top - (int) (8 * density));
+        videoWrap.smoothScrollTo(0, target);
+    }
+    private final VideoRowAdapter.Listener videoListener = new VideoRowAdapter.Listener() {
+        @Override public void onVideoFocused(View card, View itemView, int rowIndex, int lane) {
+            if (restoring || rowIndex < 0 || rowIndex >= visibleRows.size()) return;
+            focusZone = "video";
+            pendingVideoRestore = false;
+            lastRowKey = visibleRows.get(rowIndex).key;
+            lastVideoIndex = lane;
+            lastVideoKey = videoRowAdapters.get(rowIndex).keyAt(lane);
+            revealShelf(videoRowViews.get(rowIndex));
         }
-        // Not laid out yet: scroll there, then focus once the scroll settles.
-        grid.addOnScrollListener(new RecyclerView.OnScrollListener() {
-            @Override
-            public void onScrollStateChanged(@NonNull RecyclerView rv, int newState) {
-                if (newState != RecyclerView.SCROLL_STATE_IDLE) return;
-                rv.removeOnScrollListener(this);
-                RecyclerView.ViewHolder h = rv.findViewHolderForAdapterPosition(pos);
-                View target = h != null ? h.itemView.findViewById(R.id.card) : rv.getChildAt(0);
-                if (target != null) target.requestFocus();
+        @Override public boolean onKey(int rowIndex, int lane, int key) {
+            if (key == KeyEvent.KEYCODE_DPAD_UP) {
+                if (rowIndex == bannerRowIndex()) findViewById(R.id.btnInputs).requestFocus();
+                else if (rowIndex == firstRegularRow()) focusTile(lastAppIndex);
+                else if (rowIndex > 0) focusVideo(rowIndex - 1, lane);
+                return true;
             }
+            if (key == KeyEvent.KEYCODE_DPAD_DOWN) {
+                if (rowIndex == bannerRowIndex()) focusTile(lastAppIndex);
+                else if (rowIndex + 1 < videoRowAdapters.size()) focusVideo(rowIndex + 1, lane);
+                else if (channelBlockView.getVisibility() == View.VISIBLE) focusChannel(lane);
+                return true;
+            }
+            return false;
+        }
+    };
+    private void focusVideo(int index, int lane) {
+        if (index < 0 || index >= videoRowAdapters.size()) return;
+        videoRowAdapters.get(index).focusAt(lane);
+        revealShelf(videoRowViews.get(index));
+    }
+
+    private void refreshContentRows() {
+        if (!resumed) return;
+        final int generation = ++refreshGeneration;
+        final boolean[] loaded = {false, false};
+        providerRows.load(this, rows -> {
+            if (!resumed || generation != refreshGeneration) return;
+            providerRowData = rows; loaded[0] = true;
+            if (loaded[1]) renderContentRows();
         });
-        grid.smoothScrollToPosition(pos);
+        cinemanaRows.load(rows -> {
+            if (!resumed || generation != refreshGeneration) return;
+            cinemanaRowData = rows;
+            renderContentRows();
+        });
+        List<String> specs = new ArrayList<>();
+        for (String s : getResources().getStringArray(R.array.content_rows)) if (s != null && !s.trim().isEmpty()) specs.add(s.trim());
+        feedLoader.load(specs, rows -> {
+            if (!resumed || generation != refreshGeneration) return;
+            feedRowData = rows; loaded[1] = true;
+            if (loaded[0]) renderContentRows();
+        });
+    }
+    private void renderContentRows() {
+        if (!resumed || isDestroyed()) return;
+        java.util.Set<String> hidden = hiddenRows();
+        List<FeedLoader.Row> merged = new ArrayList<>();
+        if (providerRowData != null) for (FeedLoader.Row r : providerRowData) if (!hidden.contains(r.key) && !r.videos.isEmpty()) merged.add(r);
+        if (feedRowData != null) for (FeedLoader.Row r : feedRowData) if (!hidden.contains(r.key) && !r.videos.isEmpty()) merged.add(r);
+        if (cinemanaRowData != null) for (FeedLoader.Row r : cinemanaRowData) if (!hidden.contains(r.key) && !r.videos.isEmpty()) merged.add(r);
+        RowOrder.sort(merged, rowsPrefs());
+        // Cinemana is the featured shelf above the apps dock; other shelves keep their saved order.
+        for (int i = 0; i < merged.size(); i++) if (CinemanaRows.KEY.equals(merged.get(i).key)) {
+            merged.add(0, merged.remove(i)); break;
+        }
+        StringBuilder signature = new StringBuilder();
+        for (FeedLoader.Row r : merged) {
+            signature.append(r.key).append('|').append(r.title);
+            for (FeedLoader.Video v : r.videos) signature.append('\n').append(v.identity()).append('|').append(v.title).append('|').append(v.thumb).append('|').append(v.positionMs).append('|').append(v.durationMs).append('|').append(v.rating).append('|').append(v.genres);
+        }
+        String fingerprint = signature.toString();
+        boolean restoreVideo = pendingVideoRestore || "video".equals(focusZone);
+        String rowKey = lastRowKey, videoKey = lastVideoKey;
+        int lane = lastVideoIndex;
+        if (!fingerprint.equals(renderedFingerprint)) {
+            java.util.Map<String, android.os.Parcelable> scrollStates = new java.util.HashMap<>();
+            for (int i = 0; i < visibleRows.size(); i++) {
+                RecyclerView rv = videoRowViews.get(i).findViewById(R.id.videoCards);
+                scrollStates.put(visibleRows.get(i).key, rv.getLayoutManager().onSaveInstanceState());
+            }
+            restoring = true;
+            videoRowsContainer.removeAllViews();
+            cinemanaShelf.removeAllViews(); videoRowViews.clear();
+            videoRowAdapters.clear(); visibleRows.clear();
+            for (FeedLoader.Row r : merged) {
+                int index = visibleRows.size();
+                View rowView = getLayoutInflater().inflate(R.layout.video_row, videoRowsContainer, false);
+                boolean cinemanaBanner = CinemanaRows.KEY.equals(r.key);
+                ((TextView) rowView.findViewById(R.id.rowCaption)).setText(cinemanaBanner ? "Cinemana 4K" : r.title);
+                String source = r.videos.get(0).pkg;
+                ((TextView) rowView.findViewById(R.id.rowSource)).setText(getString(R.string.row_source_count, appLabel(source), r.videos.size()));
+                rowView.findViewById(R.id.rowSource).setVisibility(cinemanaBanner ? View.GONE : View.VISIBLE);
+                RecyclerView cards = rowView.findViewById(R.id.videoCards);
+                cards.setLayoutManager(new LinearLayoutManager(this, RecyclerView.HORIZONTAL, false));
+                cards.setNestedScrollingEnabled(false);
+                cards.setItemAnimator(null);
+                VideoRowAdapter a = new VideoRowAdapter(this, cards, index, videoListener);
+                cards.setAdapter(a); a.setItems(r.videos);
+                cards.addItemDecoration(new RecyclerView.ItemDecoration() {
+                    @Override public void getItemOffsets(@NonNull Rect out, @NonNull View v, @NonNull RecyclerView parent, @NonNull RecyclerView.State state) {
+                        out.right = (int) (18 * density);
+                    }
+                });
+                if (cinemanaBanner) cinemanaShelf.addView(rowView);
+                else videoRowsContainer.addView(rowView);
+                videoRowViews.add(rowView);
+                visibleRows.add(r); videoRowAdapters.add(a);
+                android.os.Parcelable saved = scrollStates.get(r.key);
+                if (saved != null) cards.getLayoutManager().onRestoreInstanceState(saved);
+            }
+            restoring = false;
+            renderedFingerprint = fingerprint;
+            android.util.Log.i("TvHome", "Rendered " + merged.size() + " content rows");
+        }
+        boolean noRows = merged.isEmpty();
+        contentStatus.setVisibility(noRows ? View.VISIBLE : View.GONE);
+        contentStatus.setText(checkSelfPermission("android.permission.READ_TV_LISTINGS") != android.content.pm.PackageManager.PERMISSION_GRANTED
+            ? R.string.permission_rows_hint : (!hidden.isEmpty() ? R.string.hidden_rows_hint : R.string.empty_rows));
+        channelBlockView.setVisibility(noRows && channelAdapter.getItemCount() > 0 ? View.VISIBLE : View.GONE);
+        if (restoreVideo) {
+            pendingVideoRestore = false;
+            int index = -1;
+            for (int i = 0; i < visibleRows.size(); i++) if (java.util.Objects.equals(visibleRows.get(i).key, rowKey)) { index = i; break; }
+            if (index >= 0) {
+                int pos = videoRowAdapters.get(index).positionOf(videoKey);
+                focusVideo(index, pos >= 0 ? pos : lane);
+            } else focusTile(lastAppIndex);
+        }
+    }
+    private String appLabel(String pkg) {
+        if (pkg == null || pkg.isEmpty()) return getString(R.string.feed_source);
+        try { return String.valueOf(getPackageManager().getApplicationLabel(getPackageManager().getApplicationInfo(pkg, 0))); }
+        catch (Exception e) { return "Video app"; }
+    }
+    private android.content.SharedPreferences rowsPrefs() {
+        return getSharedPreferences("tvhome", MODE_PRIVATE);
+    }
+
+    private java.util.Set<String> hiddenRows() {
+        java.util.Set<String> stored = rowsPrefs().getStringSet("hidden_rows", null);
+        return stored == null ? new java.util.HashSet<>() : new java.util.HashSet<>(stored);
+    }
+
+    /** Remote-friendly ordering: select a shelf, then move or hide it. */
+    private void showRowsManager() { showRowsManager(null); }
+    private void showRowsManager(String selectedKey) {
+        List<FeedLoader.Row> rows = new ArrayList<>();
+        if (providerRowData != null) rows.addAll(providerRowData);
+        if (feedRowData != null) rows.addAll(feedRowData);
+        if (cinemanaRowData != null) rows.addAll(cinemanaRowData);
+        RowOrder.sort(rows, rowsPrefs());
+        if (rows.isEmpty()) {
+            Toast.makeText(this, R.string.nothing_published, Toast.LENGTH_SHORT).show(); return;
+        }
+        String[] labels = new String[rows.size()];
+        java.util.Set<String> hidden = hiddenRows();
+        int selected = 0;
+        for (int i = 0; i < rows.size(); i++) {
+            FeedLoader.Row row = rows.get(i);
+            labels[i] = (i + 1) + ".  " + row.title + (hidden.contains(row.key) ? "  ·  " + getString(R.string.row_hidden) : "");
+            if (row.key.equals(selectedKey)) selected = i;
+        }
+        android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle(R.string.rows_order_title)
+            .setItems(labels, (d, index) -> showRowActions(rows, index))
+            .setPositiveButton(android.R.string.ok, null).create();
+        final int focus = selected;
+        dialog.setOnShowListener(d -> { dialog.getListView().setSelection(focus); dialog.getListView().requestFocus(); });
+        dialog.show();
+    }
+    private void showRowActions(List<FeedLoader.Row> rows, int index) {
+        FeedLoader.Row row = rows.get(index);
+        List<String> actions = new ArrayList<>();
+        List<Integer> destinations = new ArrayList<>();
+        if (index > 0) {
+            actions.add(getString(R.string.row_move_first)); destinations.add(0);
+            if (index > 1) { actions.add(getString(R.string.row_move_up)); destinations.add(index - 1); }
+        }
+        if (index < rows.size() - 1) { actions.add(getString(R.string.row_move_down)); destinations.add(index + 1); }
+        actions.add(getString(hiddenRows().contains(row.key) ? R.string.row_show : R.string.row_hide)); destinations.add(-1);
+        new android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle(row.title)
+            .setItems(actions.toArray(new String[0]), (d, which) -> {
+                int target = destinations.get(which);
+                if (target < 0) {
+                    java.util.Set<String> hidden = hiddenRows();
+                    if (!hidden.remove(row.key)) hidden.add(row.key);
+                    rowsPrefs().edit().putStringSet("hidden_rows", hidden).apply();
+                } else RowOrder.move(rowsPrefs(), rows, row.key, target);
+                renderContentRows();
+                showRowsManager(row.key);
+            }).setNegativeButton(android.R.string.cancel, (d, which) -> showRowsManager(row.key)).show();
     }
 
     // ---- top bar ---------------------------------------------------------------------------------
@@ -466,7 +605,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 CharSequence l = info.loadLabel(this);
                 String label = l == null ? info.getId() : l.toString();
                 boolean hdmi = info.getType() == TvInputInfo.TYPE_HDMI;
-                if (hdmi && !label.toUpperCase().contains("HDMI")) label = "HDMI " + label;
+                if (hdmi && !label.toUpperCase(java.util.Locale.ROOT).contains("HDMI")) label = "HDMI " + label;
                 final String id = info.getId();
                 int state = hdmi && hdmiStateBogus ? -1 : tim.getInputState(id);
                 if (!hdmi && rows.getChildCount() > 0 && !sawNonHdmi) addSeparator(rows);

@@ -1,0 +1,13 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginBottom="18dp"
+    android:orientation="vertical" android:clipChildren="false" android:clipToPadding="false">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical" android:orientation="horizontal">
+        <TextView android:id="@+id/rowCaption" style="@style/ShelfTitle" android:layout_width="0dp" android:layout_weight="1" />
+        <TextView android:id="@+id/rowSource" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:layout_marginEnd="8dp" android:textSize="12sp" android:textColor="@color/home_muted" android:fontFamily="@font/outfit" android:fontVariationSettings="'wght' 450" />
+    </LinearLayout>
+    <androidx.recyclerview.widget.RecyclerView android:id="@+id/videoCards" android:layout_width="match_parent"
+        android:layout_height="wrap_content" android:paddingStart="8dp" android:paddingEnd="8dp" android:paddingTop="10dp" android:paddingBottom="8dp"
+        android:overScrollMode="never" android:clipChildren="false" android:clipToPadding="false" android:scrollbars="none"
+        android:descendantFocusability="afterDescendants" />
+</LinearLayout>

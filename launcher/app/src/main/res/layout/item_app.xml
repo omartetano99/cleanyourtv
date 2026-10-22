@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="match_parent"
+    android:layout_width="196dp"
     android:layout_height="wrap_content"
     android:paddingTop="8dp"
     android:paddingBottom="8dp"
@@ -13,6 +13,7 @@
         android:layout_height="101dp"
         android:layout_gravity="center_horizontal|top"
         android:background="@drawable/tile_bg"
+        android:foreground="@drawable/focus_outline"
         android:focusable="true"
         android:clickable="true">
 
@@ -58,8 +59,8 @@
         android:gravity="center"
         android:singleLine="true"
         android:ellipsize="end"
-        android:alpha="0"
-        android:translationY="-6dp"
+        android:alpha="1"
+        android:translationY="0dp"
         android:textColor="#F2FFFFFF"
         android:textSize="14sp"
         android:fontFamily="@font/outfit"
