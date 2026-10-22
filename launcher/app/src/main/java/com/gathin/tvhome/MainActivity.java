@@ -67,9 +67,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private boolean resumed, restoring, pendingVideoRestore, observerRegistered;
     private int refreshGeneration;
     private boolean recoveryPending;
+    private boolean waitingForUnlock;
+    private android.content.BroadcastReceiver unlockReceiver;
     private final Runnable resumePlayback = () -> {
         recoveryPending = false;
-        if (resumed && !PlaybackRecovery.resume(this)) PlaybackRecovery.stayHome(this);
+        if (resumed && getSystemService(android.os.PowerManager.class).isInteractive() && !PlaybackRecovery.resume(this)) PlaybackRecovery.stayHome(this);
     };
     private String renderedFingerprint;
     private String focusZone = "apps", lastAppKey, lastRowKey, lastVideoKey;
@@ -96,6 +98,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        // Vendor TvBoot resolves HOME before credential storage is unlocked.
+        // Show a real window immediately, but never touch normal preferences until unlock.
+        if (!getSystemService(android.os.UserManager.class).isUserUnlocked()) {
+            waitingForUnlock = true;
+            setContentView(R.layout.home_starting);
+            unlockReceiver = new android.content.BroadcastReceiver() {
+                @Override public void onReceive(Context context, Intent intent) { recreate(); }
+            };
+            registerReceiver(unlockReceiver, new android.content.IntentFilter(Intent.ACTION_USER_UNLOCKED));
+            if (getSystemService(android.os.UserManager.class).isUserUnlocked()) recreate();
+            return;
+        }
         setContentView(R.layout.activity_main);
         density = getResources().getDisplayMetrics().density;
         COLUMNS = Math.max(1, getResources().getInteger(R.integer.columns));
@@ -186,6 +200,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     @Override protected void onResume() {
         super.onResume();
+        if (waitingForUnlock) return;
         resumed = true;
         PlaybackRecovery.homeVisible = true;
         PlaybackRecovery.initialize(this);
@@ -198,9 +213,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
         pendingVideoRestore = "video".equals(focusZone);
         final String returnApp = lastAppKey;
-        restoring = true;
-        adapter.reload();
-        restoring = false;
+        adapter.reload(() -> {
+            if (!resumed || pendingVideoRestore || !"apps".equals(focusZone)) return;
+            int position = adapter.positionOf(lastAppKey);
+            focusTile(position >= 0 ? position : lastAppIndex);
+        });
         updateGreeting();
         updateWifiLabel();
         handler.removeCallbacks(minuteTick);
@@ -224,6 +241,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     @Override protected void onPause() {
         super.onPause();
+        if (waitingForUnlock) return;
         resumed = false;
         PlaybackRecovery.homeVisible = false;
         handler.removeCallbacks(resumePlayback);
@@ -238,7 +256,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
 
     @Override protected void onDestroy() {
         super.onDestroy();
+        if (unlockReceiver != null) unregisterReceiver(unlockReceiver);
+        if (waitingForUnlock) return;
         handler.removeCallbacksAndMessages(null);
+        adapter.close();
         feedLoader.close();
         providerRows.close();
         cinemanaRows.close();
@@ -256,7 +277,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         return super.dispatchKeyEvent(event);
     }
 
-    @Override public void onBackPressed() { focusTile(lastAppIndex); }
+    @Override public void onBackPressed() { if (!waitingForUnlock) focusTile(lastAppIndex); }
 
     @Override public void onRequestPermissionsResult(int code, @NonNull String[] permissions, @NonNull int[] results) {
         super.onRequestPermissionsResult(code, permissions, results);
@@ -388,13 +409,31 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         StringBuilder signature = new StringBuilder();
         for (FeedLoader.Row r : merged) {
             signature.append(r.key).append('|').append(r.title);
-            for (FeedLoader.Video v : r.videos) signature.append('\n').append(v.identity()).append('|').append(v.title).append('|').append(v.thumb).append('|').append(v.positionMs).append('|').append(v.durationMs).append('|').append(v.rating).append('|').append(v.genres);
+            for (FeedLoader.Video v : r.videos) signature.append('\n').append(v.identity()).append('|').append(v.title).append('|').append(v.thumb).append('|').append(v.positionMs).append('|').append(v.durationMs).append('|').append(v.rating).append('|').append(v.genres).append('|').append(v.bannerIndex);
         }
         String fingerprint = signature.toString();
         boolean restoreVideo = pendingVideoRestore || "video".equals(focusZone);
         String rowKey = lastRowKey, videoKey = lastVideoKey;
         int lane = lastVideoIndex;
-        if (!fingerprint.equals(renderedFingerprint)) {
+        boolean changed = !fingerprint.equals(renderedFingerprint);
+        boolean sameOrder = merged.size() == visibleRows.size();
+        for (int i = 0; sameOrder && i < merged.size(); i++)
+            sameOrder = java.util.Objects.equals(merged.get(i).key, visibleRows.get(i).key);
+        if (changed && sameOrder) {
+            restoring = true;
+            for (int i = 0; i < merged.size(); i++) {
+                FeedLoader.Row row = merged.get(i);
+                View view = videoRowViews.get(i);
+                boolean featured = CinemanaRows.KEY.equals(row.key);
+                ((TextView) view.findViewById(R.id.rowCaption)).setText(featured ? "Cinemana 4K" : row.title);
+                if (!featured) ((TextView) view.findViewById(R.id.rowSource)).setText(
+                    getString(R.string.row_source_count, appLabel(row.videos.get(0).pkg), row.videos.size()));
+                videoRowAdapters.get(i).setItems(row.videos);
+            }
+            visibleRows.clear(); visibleRows.addAll(merged);
+            restoring = false;
+            renderedFingerprint = fingerprint;
+        } else if (changed) {
             java.util.Map<String, android.os.Parcelable> scrollStates = new java.util.HashMap<>();
             for (int i = 0; i < visibleRows.size(); i++) {
                 RecyclerView rv = videoRowViews.get(i).findViewById(R.id.videoCards);
@@ -439,7 +478,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         contentStatus.setText(checkSelfPermission("android.permission.READ_TV_LISTINGS") != android.content.pm.PackageManager.PERMISSION_GRANTED
             ? R.string.permission_rows_hint : (!hidden.isEmpty() ? R.string.hidden_rows_hint : R.string.empty_rows));
         channelBlockView.setVisibility(noRows && channelAdapter.getItemCount() > 0 ? View.VISIBLE : View.GONE);
-        if (restoreVideo) {
+        if (restoreVideo && (changed || pendingVideoRestore)) {
             pendingVideoRestore = false;
             int index = -1;
             for (int i = 0; i < visibleRows.size(); i++) if (java.util.Objects.equals(visibleRows.get(i).key, rowKey)) { index = i; break; }

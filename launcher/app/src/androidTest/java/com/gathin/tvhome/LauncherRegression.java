@@ -32,6 +32,7 @@ public final class LauncherRegression extends Instrumentation {
     @Override public void onStart() {
         Bundle result = new Bundle();
         try {
+            stabilityChecks();
             recoveryChecks();
             rowChecks();
             Intent intent = new Intent(getTargetContext(), MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TASK);
@@ -78,6 +79,7 @@ public final class LauncherRegression extends Instrumentation {
                 invoke("renderContentRows");
             }); awaitFocus("Video 1:2");
             passed.add("row reorder retains selected video and updates screen order");
+            ui(() -> original[0] = activity.getCurrentFocus());
             ui(() -> {
                 List<FeedLoader.Row> rows = fixture();
                 FeedLoader.Video first = rows.get(2).videos.remove(0); rows.get(2).videos.add(first);
@@ -85,6 +87,8 @@ public final class LauncherRegression extends Instrumentation {
             }); settle();
             ui(() -> check("Video 1:2".contentEquals(activity.getCurrentFocus().getContentDescription()), "Changed refresh should follow video identity"));
             passed.add("reordered refresh restores selected video");
+            ui(() -> check(original[0] == activity.getCurrentFocus(), "Updating another shelf must preserve the focused card view"));
+            passed.add("changed shelf retains other shelf views");
             ui(() -> {
                 Set<String> hide = new HashSet<>(); for (int i = 0; i < 8; i++) hide.add("test|" + i);
                 activity.getSharedPreferences("tvhome", 0).edit().putStringSet("hidden_rows", hide).commit(); invoke("renderContentRows");
@@ -133,6 +137,11 @@ public final class LauncherRegression extends Instrumentation {
                 Thumbnails.load(null, image);
                 check(image.getTag() == null && image.getDrawable() == null, "Empty artwork must invalidate pending thumbnail and clear drawable");
                 cache.remove("test-cache");
+                Thumbnails.load("invalid://cancelled-request", image);
+                Object request = image.getTag();
+                Thumbnails.clear(image);
+                Field cancelled = request.getClass().getDeclaredField("cancelled"); cancelled.setAccessible(true);
+                check(cancelled.getBoolean(request), "Recycled artwork must cancel obsolete queued work");
             }); passed.add("thumbnail cache reuse and missing artwork");
             Method parser = FeedLoader.class.getDeclaredMethod("parse", java.io.InputStream.class); parser.setAccessible(true);
             String rss = "<rss><channel><title>Channel</title><item><title>A</title><link>https://example.invalid/a</link></item><item><title>Duplicate</title><link>https://example.invalid/a</link></item></channel></rss>";
@@ -148,6 +157,32 @@ public final class LauncherRegression extends Instrumentation {
             result.putString("stream", "\nFAILED after " + passed + "\n" + android.util.Log.getStackTraceString(e));
             restore(); finish(Activity.RESULT_CANCELED, result);
         }
+    }
+    private void stabilityChecks() throws Exception {
+        android.content.Context context = getTargetContext();
+        android.content.pm.ActivityInfo home = context.getPackageManager().getActivityInfo(
+            new android.content.ComponentName(context, MainActivity.class), 0);
+        check(home.directBootAware, "Home must resolve before user unlock");
+        android.content.pm.ServiceInfo helper = context.getPackageManager().getServiceInfo(
+            new android.content.ComponentName(context, CinemanaResume.class), android.content.pm.PackageManager.GET_META_DATA);
+        try (android.content.res.XmlResourceParser xml = helper.loadXmlMetaData(context.getPackageManager(), "android.accessibilityservice")) {
+            while (xml.next() != org.xmlpull.v1.XmlPullParser.START_TAG) { }
+            String ns = "http://schemas.android.com/apk/res/android";
+            check(!xml.getAttributeBooleanValue(ns, "canRequestFilterKeyEvents", false), "Helper must not intercept hardware key repeats");
+            check((xml.getAttributeIntValue(ns, "accessibilityFlags", 0) & 32) == 0, "No global key filtering flag");
+        }
+        passed.add("early boot Home and native remote key handling manifest");
+        android.media.MediaMetadata media = new android.media.MediaMetadata.Builder()
+            .putLong(android.media.MediaMetadata.METADATA_KEY_DURATION, 600000).build();
+        android.media.session.PlaybackState.Builder state = new android.media.session.PlaybackState.Builder();
+        check(!PlaybackMonitor.canResumeSession(state.setState(android.media.session.PlaybackState.STATE_BUFFERING, 100, 1f).build(), media),
+            "Buffering session cannot prove a player survived standby");
+        check(!PlaybackMonitor.canResumeSession(state.setState(android.media.session.PlaybackState.STATE_PAUSED, 100, 0f).build(), media),
+            "Paused player without play support must relaunch");
+        check(PlaybackMonitor.canResumeSession(state.setActions(android.media.session.PlaybackState.ACTION_PLAY)
+            .setState(android.media.session.PlaybackState.STATE_PAUSED, 100, 0f).build(), media), "Valid paused player can resume");
+        check(!PlaybackMonitor.canResumeSession(state.build(), null), "Empty media session cannot consume recovery");
+        passed.add("standby rejects empty, buffering and uncontrollable media sessions");
     }
     private void recoveryChecks() throws Exception {
         android.content.Context isolated = new android.content.ContextWrapper(getTargetContext()) {

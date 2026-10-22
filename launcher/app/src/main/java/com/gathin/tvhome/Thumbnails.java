@@ -13,8 +13,6 @@ import java.io.InputStream;
 import java.lang.ref.WeakReference;
 import java.net.HttpURLConnection;
 import java.net.URL;
-import java.util.concurrent.Executor;
-import java.util.concurrent.Executors;
 
 /** Bounded image cache; a unique bind token prevents recycled cards receiving stale artwork. */
 final class Thumbnails {
@@ -22,9 +20,13 @@ final class Thumbnails {
             (int) Math.min(12 * 1024 * 1024, Runtime.getRuntime().maxMemory() / 12)) {
         @Override protected int sizeOf(String key, Bitmap value) { return value.getByteCount(); }
     };
-    private static final Executor EXEC = Executors.newFixedThreadPool(3);
+    private static final java.util.concurrent.ThreadPoolExecutor EXEC = new java.util.concurrent.ThreadPoolExecutor(
+        2, 2, 0L, java.util.concurrent.TimeUnit.MILLISECONDS, new java.util.concurrent.LinkedBlockingQueue<>());
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     static void clear(ImageView view) {
+        if (view.getTag() instanceof Request) {
+            Request old = (Request) view.getTag(); old.cancelled = true; EXEC.remove(old);
+        }
         view.setTag(null); view.animate().cancel(); view.setAlpha(1f); view.setImageDrawable(null);
     }
     static void load(String url, ImageView view) {
@@ -37,26 +39,40 @@ final class Thumbnails {
         clear(view);
         if (url == null || url.trim().isEmpty()) return;
         String cacheKey = banner ? url + "|banner" : url;
-        Object token = new Object();
-        view.setTag(token); // Also on cache hits: invalidates any previous asynchronous request.
         Bitmap cached = CACHE.get(cacheKey);
-        if (cached != null) { view.setImageBitmap(cached); return; }
-        WeakReference<ImageView> ref = new WeakReference<>(view);
-        Context app = view.getContext().getApplicationContext();
-        EXEC.execute(() -> {
+        if (cached != null) { view.setTag(new Object()); view.setImageBitmap(cached); return; }
+        Request request = new Request(view, url, cacheKey, banner);
+        view.setTag(request);
+        EXEC.execute(request);
+    }
+    private static final class Request implements Runnable {
+        final WeakReference<ImageView> target;
+        final Context app;
+        final String url, cacheKey;
+        final boolean banner;
+        volatile boolean cancelled;
+        Request(ImageView view, String url, String cacheKey, boolean banner) {
+            target = new WeakReference<>(view); app = view.getContext().getApplicationContext();
+            this.url = url; this.cacheKey = cacheKey; this.banner = banner;
+        }
+        @Override public void run() {
+            // Fast D-pad navigation must not leave obsolete downloads ahead of visible artwork.
+            if (cancelled || target.get() == null) return;
             Bitmap bitmap = CACHE.get(cacheKey);
             if (bitmap == null) bitmap = fetch(app, url, banner);
             if (bitmap == null) return;
             CACHE.put(cacheKey, bitmap);
+            if (cancelled) return;
+            bitmap.prepareToDraw();
             final Bitmap result = bitmap;
             MAIN.post(() -> {
-                ImageView target = ref.get();
-                if (target != null && target.getTag() == token) {
-                    target.setAlpha(0f); target.setImageBitmap(result);
-                    target.animate().alpha(1f).setDuration(180).start();
+                ImageView view = target.get();
+                if (!cancelled && view != null && view.getTag() == this) {
+                    view.setAlpha(0f); view.setImageBitmap(result);
+                    view.animate().alpha(1f).setDuration(140).start();
                 }
             });
-        });
+        }
     }
     private static Bitmap fetch(Context context, String url, boolean banner) {
         HttpURLConnection connection = null;

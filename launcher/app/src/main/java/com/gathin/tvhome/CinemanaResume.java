@@ -11,7 +11,6 @@ import android.media.session.PlaybackState;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
-import android.view.KeyEvent;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import java.util.List;
@@ -24,6 +23,7 @@ public final class CinemanaResume extends AccessibilityService {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private String screen = "", detailTitle = "", detailYear = "";
     private long lastAction;
+    private long automaticInputUntil;
     private boolean openedHistory;
     private boolean bannerSection, bannerJumped, bannerPositioned;
     private int bannerSteps;
@@ -43,6 +43,7 @@ public final class CinemanaResume extends AccessibilityService {
         instance.bannerSection = false; instance.bannerJumped = false; instance.bannerPositioned = false; instance.bannerSteps = 0; instance.screen = "";
         // Wait for the new Home window; accessibility can briefly return the previous detail page.
         instance.lastAction = SystemClock.uptimeMillis() + 1000;
+        instance.automaticInputUntil = SystemClock.uptimeMillis() + 2500;
         context.startActivity(intent);
         instance.schedule(400);
         android.widget.Toast.makeText(context, context.getString(R.string.cinemana_opening, video.title), android.widget.Toast.LENGTH_SHORT).show();
@@ -68,6 +69,7 @@ public final class CinemanaResume extends AccessibilityService {
         if (instance == null) return; // System may bind accessibility after the home activity on boot.
         instance.openedHistory = false;
         instance.lastAction = 0;
+        instance.automaticInputUntil = SystemClock.uptimeMillis() + 2500;
         instance.schedule(500);
     }
     static void cancel(Context c) {
@@ -83,16 +85,13 @@ public final class CinemanaResume extends AccessibilityService {
             String name = event.getClassName().toString();
             if (name.startsWith("com.shabakaty.")) screen = name;
         }
-        schedule(150);
-    }
-    @Override protected boolean onKeyEvent(KeyEvent event) {
-        if (event.getAction() == KeyEvent.ACTION_DOWN && (pending(this) || bannerPending(this))) {
-            int key = event.getKeyCode();
-            if (key == KeyEvent.KEYCODE_BACK || key == KeyEvent.KEYCODE_HOME || key == KeyEvent.KEYCODE_DPAD_CENTER
-                || key == KeyEvent.KEYCODE_DPAD_UP || key == KeyEvent.KEYCODE_DPAD_DOWN
-                || key == KeyEvent.KEYCODE_DPAD_LEFT || key == KeyEvent.KEYCODE_DPAD_RIGHT) cancel(this);
+        if ((event.getEventType() == AccessibilityEvent.TYPE_VIEW_FOCUSED
+                || event.getEventType() == AccessibilityEvent.TYPE_VIEW_CLICKED)
+                && event.getEventTime() > automaticInputUntil && (pending(this) || bannerPending(this))) {
+            cancel(this);
+            return;
         }
-        return false;
+        schedule(150);
     }
     private void inspect() {
         long bannerDeadline = PlaybackRecovery.prefs(this).getLong("cinemana_banner_until", 0);
@@ -120,7 +119,7 @@ public final class CinemanaResume extends AccessibilityService {
                 if (restoring) {
                     // Never seek an unidentified/wrong video, even if History changed underneath us.
                     if (sameTitle(p.getString("cinemana_title", ""), playerTitle)) restorePosition(p);
-                } else if (!playerTitle.isEmpty()) {
+                } else if (!playerTitle.isEmpty() && !sameTitle(p.getString("cinemana_title", ""), playerTitle)) {
                     boolean changed = !sameTitle(p.getString("cinemana_title", ""), playerTitle);
                     SharedPreferences.Editor edit = p.edit().putString("cinemana_title", playerTitle).putString("title", playerTitle);
                     if (sameTitle(detailTitle, playerTitle)) edit.putString("cinemana_year", detailYear);
@@ -143,6 +142,7 @@ public final class CinemanaResume extends AccessibilityService {
             }
             if (!openedHistory && screen.endsWith(".HomeActivity") && !text(root, "movie_name").isEmpty()) {
                 // Leanback can start with headers collapsed. Reveal the navigation before selecting History.
+                automaticInputUntil = SystemClock.uptimeMillis() + 1000;
                 performGlobalAction(GLOBAL_ACTION_BACK); lastAction = SystemClock.uptimeMillis(); return;
             }
             if (openedHistory || sameTitle("السجل", text(root, "title_text")) || sameTitle("History", text(root, "title_text"))) {
@@ -184,6 +184,7 @@ public final class CinemanaResume extends AccessibilityService {
                     args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_ROW_INT, 0);
                     args.putInt(AccessibilityNodeInfo.ACTION_ARGUMENT_COLUMN_INT, Math.max(0, prefs.getInt("cinemana_banner_index", 0)));
                     bannerJumped = true;
+                    automaticInputUntil = SystemClock.uptimeMillis() + 1000;
                     boolean jumped = row.performAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_SCROLL_TO_POSITION.getId(), args);
                     android.util.Log.i("TvHomeResume", "Banner jump " + prefs.getInt("cinemana_banner_index", 0) + " accepted=" + jumped);
                     if (jumped) { row.recycle(); lastAction = SystemClock.uptimeMillis(); return; }
@@ -196,6 +197,7 @@ public final class CinemanaResume extends AccessibilityService {
                     AccessibilityNodeInfo.CollectionItemInfo item = child.getCollectionItemInfo();
                     if (!bannerPositioned && item != null && item.getColumnIndex() == index) {
                         bannerPositioned = true;
+                        automaticInputUntil = SystemClock.uptimeMillis() + 1000;
                         child.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
                         child.recycle(); row.recycle(); lastAction = SystemClock.uptimeMillis(); return;
                     }
@@ -207,7 +209,7 @@ public final class CinemanaResume extends AccessibilityService {
             AccessibilityNodeInfo focused = root.findFocus(AccessibilityNodeInfo.FOCUS_INPUT);
             if (focused != null) {
                 AccessibilityNodeInfo next = focused.focusSearch(android.view.View.FOCUS_LEFT);
-                if (next != null) { next.performAction(AccessibilityNodeInfo.ACTION_FOCUS); next.recycle(); }
+                if (next != null) { automaticInputUntil = SystemClock.uptimeMillis() + 1000; next.performAction(AccessibilityNodeInfo.ACTION_FOCUS); next.recycle(); }
                 focused.recycle();
             }
             lastAction = SystemClock.uptimeMillis();
@@ -268,6 +270,7 @@ public final class CinemanaResume extends AccessibilityService {
                 // Leanback chooses the row on focus; clicking an unfocused header opens the old row.
                 int action = current.isFocusable() && !current.isFocused()
                     ? AccessibilityNodeInfo.ACTION_FOCUS : AccessibilityNodeInfo.ACTION_CLICK;
+                automaticInputUntil = SystemClock.uptimeMillis() + 1000;
                 boolean result = current.performAction(action);
                 current.recycle();
                 if (result) lastAction = SystemClock.uptimeMillis();

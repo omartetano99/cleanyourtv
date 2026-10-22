@@ -54,6 +54,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         final Drawable banner;
         final Drawable icon;
         int ambient;
+        long updated;
 
         Entry(String label, ComponentName component, Drawable banner, Drawable icon) {
             this.label = label;
@@ -86,21 +87,65 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
         setHasStableIds(true);
     }
 
-    void reload() {
+    private final java.util.concurrent.ExecutorService loader = java.util.concurrent.Executors.newSingleThreadExecutor();
+    private final android.os.Handler main = new android.os.Handler(android.os.Looper.getMainLooper());
+    private int generation;
+    private boolean closed;
+    private String catalogue = "";
+    // Worker-owned cache: no drawable decoding for unchanged installed apps.
+    private java.util.Map<String, Entry> appCache = new java.util.HashMap<>();
+
+    void close() { closed = true; generation++; loader.shutdownNow(); main.removeCallbacksAndMessages(null); }
+    void reload(Runnable ready) {
+        final int request = ++generation;
+        loader.execute(() -> {
+            List<Entry> fresh = readApps();
+            StringBuilder signature = new StringBuilder();
+            for (Entry entry : fresh) signature.append(entry.component).append('|').append(entry.label)
+                .append('|').append(entry.updated).append('\n');
+            String next = signature.toString();
+            main.post(() -> {
+                if (closed || request != generation) return;
+                if (!catalogue.equals(next)) {
+                    catalogue = next;
+                    items.clear(); items.addAll(fresh); notifyDataSetChanged();
+                }
+                ready.run();
+            });
+        });
+    }
+    private List<Entry> readApps() {
         PackageManager pm = ctx.getPackageManager();
         Intent probe = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER);
         List<ResolveInfo> found = pm.queryIntentActivities(probe, 0);
         List<Entry> fresh = new ArrayList<>();
+        java.util.Map<String, Entry> nextCache = new java.util.HashMap<>();
         for (ResolveInfo ri : found) {
             if (ri.activityInfo == null) continue;
             String pkg = ri.activityInfo.packageName;
             if (pkg.equals(ctx.getPackageName()) || hidden.contains(pkg)) continue;
+            try {
+            ComponentName component = new ComponentName(pkg, ri.activityInfo.name);
+            long updated;
+            try { updated = pm.getPackageInfo(pkg, 0).lastUpdateTime; }
+            catch (PackageManager.NameNotFoundException ignored) { continue; }
+            String cacheKey = component.flattenToString();
+            Entry cached = appCache.get(cacheKey);
+            if (cached != null && cached.updated == updated) {
+                fresh.add(cached); nextCache.put(cacheKey, cached); continue;
+            }
             Drawable banner = ri.activityInfo.loadBanner(pm);
             if (banner == null) banner = ri.activityInfo.applicationInfo.loadBanner(pm);
             Drawable icon = ri.loadIcon(pm);
             String label = String.valueOf(ri.loadLabel(pm));
-            fresh.add(new Entry(label, new ComponentName(pkg, ri.activityInfo.name), banner, icon));
+            Entry entry = new Entry(label, component, banner, icon);
+            entry.updated = updated;
+            fresh.add(entry); nextCache.put(cacheKey, entry);
+            } catch (RuntimeException removedDuringScan) {
+                android.util.Log.w("TvHome", "App changed while loading " + pkg);
+            }
         }
+        appCache = nextCache;
         Collections.sort(fresh, (a, b) -> {
             int fa = favourites.indexOf(a.pkg), fb = favourites.indexOf(b.pkg);
             if (fa >= 0 || fb >= 0) {
@@ -110,9 +155,7 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
             }
             return a.label.compareToIgnoreCase(b.label);
         });
-        items.clear();
-        items.addAll(fresh);
-        notifyDataSetChanged();
+        return fresh;
     }
 
     @NonNull
@@ -290,8 +333,8 @@ public class AppAdapter extends RecyclerView.Adapter<AppAdapter.Holder> {
             card.setOnFocusChangeListener((view, focused) -> {
                 float s = focused ? FOCUS_SCALE : 1.0f;
                 view.animate().scaleX(s).scaleY(s)
-                        .setDuration(focused ? 260 : 180)
-                        .setInterpolator(new OvershootInterpolator(focused ? 1.6f : 0f))
+                        .setDuration(150)
+                        .setInterpolator(new android.view.animation.DecelerateInterpolator())
                         .start();
                 name.setTextColor(v.getContext().getColor(focused ? R.color.home_accent : R.color.home_text));
                 int pos = getBindingAdapterPosition();

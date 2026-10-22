@@ -55,7 +55,7 @@ final class PlaybackRecovery {
         if (duration > 0) edit.putLong("duration", duration);
         if (interactive && !p.getBoolean("wake_pending", false))
             edit.putBoolean("playing", state.getState() == PlaybackState.STATE_PLAYING || state.getState() == PlaybackState.STATE_BUFFERING);
-        edit.commit();
+        edit.apply();
     }
     static boolean due(Context c) {
         SharedPreferences p = prefs(c);
