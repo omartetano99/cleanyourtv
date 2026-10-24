@@ -44,6 +44,11 @@
             </intent-filter>
         </activity>
 
+        <activity android:name=".AllAppsActivity" android:exported="false" android:screenOrientation="landscape" />
+        <activity android:name=".HomeSettingsActivity" android:exported="false" android:screenOrientation="landscape" />
+        <activity android:name=".InputActivity" android:exported="false" android:screenOrientation="landscape" />
+        <activity android:name=".AmbientActivity" android:exported="false" android:screenOrientation="landscape" android:excludeFromRecents="true" />
+
         <service android:name=".PlaybackMonitor"
             android:label="@string/playback_recovery"
             android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"

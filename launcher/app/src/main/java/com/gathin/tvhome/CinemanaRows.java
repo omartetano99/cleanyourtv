@@ -27,18 +27,32 @@ final class CinemanaRows {
     private final Context context;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
     private final Handler main = new Handler(Looper.getMainLooper());
+    private volatile boolean closed;
+    private boolean loading;
+    private FeedLoader.Callback latestCallback;
     CinemanaRows(Context c) { context = c.getApplicationContext(); }
-    void close() { io.shutdownNow(); main.removeCallbacksAndMessages(null); }
+    void close() { closed = true; io.shutdownNow(); main.removeCallbacksAndMessages(null); }
     void load(FeedLoader.Callback callback) {
+        latestCallback = callback; if (closed || loading) return; loading = true;
         io.execute(() -> {
             List<FeedLoader.Row> rows = new ArrayList<>();
+            boolean installed = false;
             try {
                 context.getPackageManager().getPackageInfo(CinemanaResume.PACKAGE, 0);
+                installed = true;
                 FeedLoader.Row row = parse(read());
                 row.title = context.getString(R.string.cinemana_watch_now);
                 if (!row.videos.isEmpty()) rows.add(row);
             } catch (Exception e) { android.util.Log.w("TvHome", "Cinemana banners unavailable: " + e.getClass().getSimpleName()); }
-            main.post(() -> callback.onRows(rows));
+            if (installed) rows.add(CinemanaHistory.row(context, rows));
+            List<FeedLoader.Row> first = new ArrayList<>(rows);
+            main.post(() -> { if (!closed) latestCallback.onRows(first); });
+            if (installed && !closed) {
+                CinemanaHistory.enrich(context);
+                rows.removeIf(row -> CinemanaHistory.KEY.equals(row.key));
+                rows.add(CinemanaHistory.row(context, rows));
+            }
+            main.post(() -> { loading = false; if (!closed) latestCallback.onRows(rows); });
         });
     }
     static FeedLoader.Row parse(String json) throws Exception {

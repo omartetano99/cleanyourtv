@@ -59,6 +59,15 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private FeedLoader feedLoader;
     private ProviderRows providerRows;
     private CinemanaRows cinemanaRows;
+    private StremioRows stremioRows;
+    private List<FeedLoader.Row> stremioRowData;
+    private boolean windowFocused;
+    private final Runnable idleScreen = () -> {
+        if (this.resumed && windowFocused && getSystemService(android.os.PowerManager.class).isInteractive() && !this.recoveryPending && AmbientSettings.idleMillis(this) > 0) {
+            if (PlaybackGuard.canIdle(this)) startActivity(new Intent(this, AmbientActivity.class));
+            else resetIdleTimer();
+        }
+    };
     private List<FeedLoader.Row> cinemanaRowData;
     private List<FeedLoader.Row> feedRowData, providerRowData;
     private final List<FeedLoader.Row> visibleRows = new ArrayList<>();
@@ -130,6 +139,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         feedLoader = new FeedLoader(this);
         providerRows = new ProviderRows();
         cinemanaRows = new CinemanaRows(this);
+        stremioRows = new StremioRows(this);
         focusZone = rowsPrefs().getString("focus_zone", "apps");
         lastAppKey = rowsPrefs().getString("focus_app", null);
         lastRowKey = rowsPrefs().getString("focus_row", null);
@@ -143,9 +153,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             if (network.resolveActivity(getPackageManager()) == null) network = new Intent(Settings.ACTION_WIFI_SETTINGS);
             open(network);
         });
-        settings.setOnClickListener(v -> open(new Intent(Settings.ACTION_SETTINGS)));
+        settings.setOnClickListener(v -> open(new Intent(this, HomeSettingsActivity.class)));
+        View allApps = findViewById(R.id.btnAllApps);
+        allApps.setOnClickListener(v -> open(new Intent(this, AllAppsActivity.class)));
         rows.setOnClickListener(v -> showRowsManager());
-        View[] buttons = {inputs, btnWifi, rows, settings};
+        View[] buttons = {inputs, btnWifi, allApps, rows, settings};
         for (int j = 0; j < buttons.length; j++) {
             final int index = j;
             buttons[j].setOnKeyListener((view, key, event) -> {
@@ -202,6 +214,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         super.onResume();
         if (waitingForUnlock) return;
         resumed = true;
+        resetIdleTimer();
         PlaybackRecovery.homeVisible = true;
         PlaybackRecovery.initialize(this);
         if (getSystemService(android.os.PowerManager.class).isInteractive()) {
@@ -243,6 +256,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         super.onPause();
         if (waitingForUnlock) return;
         resumed = false;
+        handler.removeCallbacks(idleScreen);
         PlaybackRecovery.homeVisible = false;
         handler.removeCallbacks(resumePlayback);
         recoveryPending = false;
@@ -263,11 +277,23 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         feedLoader.close();
         providerRows.close();
         cinemanaRows.close();
+        stremioRows.close();
         ConnectivityManager cm = getSystemService(ConnectivityManager.class);
         if (cm != null) cm.unregisterNetworkCallback(networkCallback);
     }
 
+    private void resetIdleTimer() {
+        handler.removeCallbacks(idleScreen);
+        if (!waitingForUnlock && resumed && windowFocused && AmbientSettings.idleMillis(this) > 0)
+            handler.postDelayed(idleScreen, AmbientSettings.idleMillis(this));
+    }
+    @Override public void onWindowFocusChanged(boolean focused) {
+        super.onWindowFocusChanged(focused); windowFocused = focused;
+        if (!waitingForUnlock) resetIdleTimer();
+    }
+    @Override public void onUserInteraction() { super.onUserInteraction(); if (!waitingForUnlock) resetIdleTimer(); }
     @Override public boolean dispatchKeyEvent(KeyEvent event) {
+        if (!waitingForUnlock && event.getAction() == KeyEvent.ACTION_DOWN) resetIdleTimer();
         if (recoveryPending && event.getAction() == KeyEvent.ACTION_DOWN) {
             handler.removeCallbacks(resumePlayback);
             recoveryPending = false;
@@ -386,6 +412,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             cinemanaRowData = rows;
             renderContentRows();
         });
+        stremioRows.load(rows -> {
+            if (!resumed || generation != refreshGeneration) return;
+            stremioRowData = rows;
+            renderContentRows();
+        });
         List<String> specs = new ArrayList<>();
         for (String s : getResources().getStringArray(R.array.content_rows)) if (s != null && !s.trim().isEmpty()) specs.add(s.trim());
         feedLoader.load(specs, rows -> {
@@ -401,6 +432,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         if (providerRowData != null) for (FeedLoader.Row r : providerRowData) if (!hidden.contains(r.key) && !r.videos.isEmpty()) merged.add(r);
         if (feedRowData != null) for (FeedLoader.Row r : feedRowData) if (!hidden.contains(r.key) && !r.videos.isEmpty()) merged.add(r);
         if (cinemanaRowData != null) for (FeedLoader.Row r : cinemanaRowData) if (!hidden.contains(r.key) && !r.videos.isEmpty()) merged.add(r);
+        if (stremioRowData != null) for (FeedLoader.Row r : stremioRowData) if (!hidden.contains(r.key) && !r.videos.isEmpty()) merged.add(r);
         RowOrder.sort(merged, rowsPrefs());
         // Cinemana is the featured shelf above the apps dock; other shelves keep their saved order.
         for (int i = 0; i < merged.size(); i++) if (CinemanaRows.KEY.equals(merged.get(i).key)) {
@@ -439,29 +471,41 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 RecyclerView rv = videoRowViews.get(i).findViewById(R.id.videoCards);
                 scrollStates.put(visibleRows.get(i).key, rv.getLayoutManager().onSaveInstanceState());
             }
+            java.util.Map<String, View> reusableViews = new java.util.HashMap<>();
+            java.util.Map<String, VideoRowAdapter> reusableAdapters = new java.util.HashMap<>();
+            for (int i = 0; i < visibleRows.size(); i++) {
+                reusableViews.put(visibleRows.get(i).key, videoRowViews.get(i));
+                reusableAdapters.put(visibleRows.get(i).key, videoRowAdapters.get(i));
+            }
             restoring = true;
             videoRowsContainer.removeAllViews();
             cinemanaShelf.removeAllViews(); videoRowViews.clear();
             videoRowAdapters.clear(); visibleRows.clear();
             for (FeedLoader.Row r : merged) {
                 int index = visibleRows.size();
-                View rowView = getLayoutInflater().inflate(R.layout.video_row, videoRowsContainer, false);
+                View rowView = reusableViews.get(r.key);
+                boolean newRow = rowView == null;
+                if (newRow) rowView = getLayoutInflater().inflate(R.layout.video_row, videoRowsContainer, false);
                 boolean cinemanaBanner = CinemanaRows.KEY.equals(r.key);
                 ((TextView) rowView.findViewById(R.id.rowCaption)).setText(cinemanaBanner ? "Cinemana 4K" : r.title);
                 String source = r.videos.get(0).pkg;
                 ((TextView) rowView.findViewById(R.id.rowSource)).setText(getString(R.string.row_source_count, appLabel(source), r.videos.size()));
                 rowView.findViewById(R.id.rowSource).setVisibility(cinemanaBanner ? View.GONE : View.VISIBLE);
                 RecyclerView cards = rowView.findViewById(R.id.videoCards);
-                cards.setLayoutManager(new LinearLayoutManager(this, RecyclerView.HORIZONTAL, false));
-                cards.setNestedScrollingEnabled(false);
-                cards.setItemAnimator(null);
-                VideoRowAdapter a = new VideoRowAdapter(this, cards, index, videoListener);
-                cards.setAdapter(a); a.setItems(r.videos);
-                cards.addItemDecoration(new RecyclerView.ItemDecoration() {
+                VideoRowAdapter a = reusableAdapters.get(r.key);
+                if (newRow) {
+                    cards.setLayoutManager(new LinearLayoutManager(this, RecyclerView.HORIZONTAL, false));
+                    cards.setNestedScrollingEnabled(false);
+                    cards.setItemAnimator(null);
+                    a = new VideoRowAdapter(this, cards, index, videoListener);
+                    cards.setAdapter(a);
+                    cards.addItemDecoration(new RecyclerView.ItemDecoration() {
                     @Override public void getItemOffsets(@NonNull Rect out, @NonNull View v, @NonNull RecyclerView parent, @NonNull RecyclerView.State state) {
                         out.right = (int) (18 * density);
                     }
-                });
+                    });
+                }
+                a.setRowIndex(index); a.setItems(r.videos);
                 if (cinemanaBanner) cinemanaShelf.addView(rowView);
                 else videoRowsContainer.addView(rowView);
                 videoRowViews.add(rowView);
@@ -509,6 +553,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         if (providerRowData != null) rows.addAll(providerRowData);
         if (feedRowData != null) rows.addAll(feedRowData);
         if (cinemanaRowData != null) rows.addAll(cinemanaRowData);
+        if (stremioRowData != null) rows.addAll(stremioRowData);
         RowOrder.sort(rows, rowsPrefs());
         if (rows.isEmpty()) {
             Toast.makeText(this, R.string.nothing_published, Toast.LENGTH_SHORT).show(); return;
@@ -518,7 +563,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         int selected = 0;
         for (int i = 0; i < rows.size(); i++) {
             FeedLoader.Row row = rows.get(i);
-            labels[i] = (i + 1) + ".  " + row.title + (hidden.contains(row.key) ? "  ·  " + getString(R.string.row_hidden) : "");
+            labels[i] = (CinemanaRows.KEY.equals(row.key) ? "Above apps · " : (i + 1) + ".  ") + row.title + (hidden.contains(row.key) ? "  ·  " + getString(R.string.row_hidden) : "");
             if (row.key.equals(selectedKey)) selected = i;
         }
         android.app.AlertDialog dialog = new android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
@@ -533,11 +578,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         FeedLoader.Row row = rows.get(index);
         List<String> actions = new ArrayList<>();
         List<Integer> destinations = new ArrayList<>();
-        if (index > 0) {
+        if (!CinemanaRows.KEY.equals(row.key) && index > 0) {
             actions.add(getString(R.string.row_move_first)); destinations.add(0);
             if (index > 1) { actions.add(getString(R.string.row_move_up)); destinations.add(index - 1); }
         }
-        if (index < rows.size() - 1) { actions.add(getString(R.string.row_move_down)); destinations.add(index + 1); }
+        if (!CinemanaRows.KEY.equals(row.key) && index < rows.size() - 1) { actions.add(getString(R.string.row_move_down)); destinations.add(index + 1); }
         actions.add(getString(hiddenRows().contains(row.key) ? R.string.row_show : R.string.row_hide)); destinations.add(-1);
         new android.app.AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
             .setTitle(row.title)
@@ -650,15 +695,12 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 if (!hdmi && rows.getChildCount() > 0 && !sawNonHdmi) addSeparator(rows);
                 if (!hdmi) sawNonHdmi = true;
                 addInputRow(rows, popup, hdmi ? R.drawable.ic_input : R.drawable.ic_av, label, state,
-                        () -> open(new Intent(Intent.ACTION_VIEW).setDataAndType(
-                                TvContract.buildChannelUriForPassthroughInput(id), "vnd.android.cursor.item/channel")));
+                        () -> open(new Intent(this, InputActivity.class).putExtra("input_id", id).putExtra("input_label", String.valueOf(info.loadLabel(this)))));
             }
         }
         Intent liveTv = liveTvPkg.isEmpty() ? null : getPackageManager().getLeanbackLaunchIntentForPackage(liveTvPkg);
         if (liveTv != null && tunerId != null) {
-            liveTv = new Intent(Intent.ACTION_VIEW)
-                    .setDataAndType(TvContract.buildChannelUriForPassthroughInput(tunerId), "vnd.android.cursor.item/channel")
-                    .setPackage(liveTvPkg);
+            liveTv.putExtra(TvInputInfo.EXTRA_INPUT_ID, tunerId);
         }
         if (liveTv != null) {
             if (rows.getChildCount() > 0) addSeparator(rows);

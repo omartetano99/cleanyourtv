@@ -48,4 +48,5 @@
     <string name="cinemana_helper_needed">Enable Cinemana playback resume in Accessibility settings to open this banner.</string>
     <string name="cinemana_banner_unavailable">This banner could not be opened. Please choose it in Cinemana’s Watch now section.</string>
     <string name="home_starting">Starting your TV…</string>
+    <string name="all_apps">Apps</string>
 </resources>
