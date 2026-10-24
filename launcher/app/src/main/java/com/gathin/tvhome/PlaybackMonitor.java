@@ -67,7 +67,10 @@ public final class PlaybackMonitor extends NotificationListenerService {
             controllers.put(c, callback); c.registerCallback(callback, handler); save(c);
         }
     }
-    private void save(MediaController c) { PlaybackRecovery.capture(this, c.getPackageName(), c.getMetadata(), c.getPlaybackState()); }
+    private void save(MediaController c) {
+        PlaybackRecovery.capture(this, c.getPackageName(), c.getMetadata(), c.getPlaybackState());
+        if (CinemanaResume.PACKAGE.equals(c.getPackageName())) CinemanaHistory.capture(this, c.getMetadata(), c.getPlaybackState());
+    }
     private void snapshot() { for (MediaController c : controllers.keySet()) save(c); }
     private void wake() {
         if (!getSystemService(PowerManager.class).isInteractive() || PlaybackRecovery.homeVisible || !PlaybackRecovery.due(this)) return;

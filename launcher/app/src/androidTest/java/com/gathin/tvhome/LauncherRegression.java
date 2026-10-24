@@ -42,6 +42,7 @@ public final class LauncherRegression extends Instrumentation {
                 savedOrder = activity.getSharedPreferences("tvhome", 0).getString("row_order", null);
                 activity.getSharedPreferences("tvhome", 0).edit().remove("row_order").commit();
                 set("cinemanaRowData", null);
+                set("stremioRowData", null);
                 hidden = new HashSet<>(activity.getSharedPreferences("tvhome", 0).getStringSet("hidden_rows", new HashSet<>()));
                 activity.getSharedPreferences("tvhome", 0).edit().remove("hidden_rows").commit();
                 ((Handler) get("handler")).removeCallbacksAndMessages(null);

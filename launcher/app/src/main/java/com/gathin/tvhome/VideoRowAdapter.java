@@ -26,12 +26,13 @@ public class VideoRowAdapter extends RecyclerView.Adapter<VideoRowAdapter.Holder
     }
     private final Context ctx;
     private final Listener listener;
-    private final int rowIndex;
+    private int rowIndex;
     private final RecyclerView row;
     private List<FeedLoader.Video> items = new ArrayList<>();
     VideoRowAdapter(Context ctx, RecyclerView row, int rowIndex, Listener listener) {
         this.ctx = ctx; this.row = row; this.rowIndex = rowIndex; this.listener = listener;
     }
+    void setRowIndex(int index) { rowIndex = index; }
     void setItems(List<FeedLoader.Video> videos) {
         List<FeedLoader.Video> old = items;
         List<FeedLoader.Video> next = videos == null ? new ArrayList<>() : new ArrayList<>(videos);
@@ -79,11 +80,11 @@ public class VideoRowAdapter extends RecyclerView.Adapter<VideoRowAdapter.Holder
             ((ImageView) item.findViewById(R.id.thumb)).setScaleType(ImageView.ScaleType.FIT_CENTER);
             TextView title = item.findViewById(R.id.title);
             title.setMaxLines(1);
-            title.setMaxWidth(Math.round(width * 0.4f));
+            title.setMaxWidth(Math.round(width * 0.36f));
             android.widget.LinearLayout details = item.findViewById(R.id.bannerDetails);
             ((ViewGroup) title.getParent()).removeView(title);
             android.widget.LinearLayout.LayoutParams titleParams = new android.widget.LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                Math.round(width * 0.30f), ViewGroup.LayoutParams.WRAP_CONTENT);
             titleParams.setMarginStart(Math.round(14 * density));
             details.addView(title, titleParams);
             ViewGroup.MarginLayoutParams detailsParams = (ViewGroup.MarginLayoutParams) details.getLayoutParams();
@@ -121,6 +122,10 @@ public class VideoRowAdapter extends RecyclerView.Adapter<VideoRowAdapter.Holder
     @Override public int getItemCount() { return items.size(); }
 
     private void open(FeedLoader.Video v) {
+        if (CinemanaResume.PACKAGE.equals(v.pkg) && v.url != null && v.url.startsWith("cinemana-history://")) {
+            try { CinemanaResume.openHistory(ctx, v); } catch (Exception e) { unavailable(v); }
+            return;
+        }
         if (CinemanaResume.PACKAGE.equals(v.pkg) && v.url != null && v.url.startsWith("cinemana-banner://")) {
             try { CinemanaResume.openBanner(ctx, v); } catch (Exception e) { unavailable(v); }
             return;

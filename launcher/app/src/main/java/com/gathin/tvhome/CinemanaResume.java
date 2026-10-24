@@ -26,7 +26,8 @@ public final class CinemanaResume extends AccessibilityService {
     private long automaticInputUntil;
     private boolean openedHistory;
     private boolean bannerSection, bannerJumped, bannerPositioned;
-    private int bannerSteps;
+    private int bannerSteps, historySteps;
+    private String lastObservedPlayer = "";
     static boolean openBanner(Context context, FeedLoader.Video video) {
         if (instance == null) {
             android.widget.Toast.makeText(context, R.string.cinemana_helper_needed, android.widget.Toast.LENGTH_LONG).show();
@@ -49,6 +50,42 @@ public final class CinemanaResume extends AccessibilityService {
         android.widget.Toast.makeText(context, context.getString(R.string.cinemana_opening, video.title), android.widget.Toast.LENGTH_SHORT).show();
         return true;
     }
+    static boolean openHistory(Context c, FeedLoader.Video video) {
+        if (instance == null) {
+            android.widget.Toast.makeText(c, R.string.cinemana_helper_needed, android.widget.Toast.LENGTH_LONG).show();
+            c.startActivity(new android.content.Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK));
+            return false;
+        }
+        android.content.Intent intent=c.getPackageManager().getLeanbackLaunchIntentForPackage(PACKAGE);
+        if(intent==null) return false;
+        intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        PlaybackRecovery.launched(c,intent,video.title);
+        boolean importing="cinemana-history://import".equals(video.url);
+        PlaybackRecovery.prefs(c).edit().putString("cinemana_title",importing?"":video.title)
+            .putLong("cinemana_restore_until",System.currentTimeMillis()+60000)
+            .putLong("cinemana_restore_position",video.positionMs).putLong("position",video.positionMs).putLong("duration",video.durationMs).putBoolean("playing",true).remove("cinemana_banner_until").apply();
+        instance.historySteps=0; instance.openedHistory=false; instance.screen=""; instance.lastAction=SystemClock.uptimeMillis()+1000;
+        instance.automaticInputUntil=SystemClock.uptimeMillis()+2500;
+        c.startActivity(intent); instance.schedule(400); return true;
+    }
+    private boolean isHistory(AccessibilityNodeInfo root) {
+        String title=text(root,"title_text"), row=text(root,"row_header");
+        return sameTitle("History",title) || sameTitle("السجل",title)
+            || sameTitle("المشاهدات",row) || sameTitle("Watch history",row) || sameTitle("History",row);
+    }
+    private void captureHistory(AccessibilityNodeInfo root) {
+        if(isHistory(root)) {
+            List<AccessibilityNodeInfo> cards=root.findAccessibilityNodeInfosByViewId(PACKAGE+":id/card_title");
+            // Append in visible source order without promoting older pages above playback.
+            for(int i=0;i<cards.size();i++) { AccessibilityNodeInfo card=cards.get(i);
+                if(card.isVisibleToUser() && card.getText()!=null) CinemanaHistory.remember(this,card.getText().toString(),null,-1,0,false);
+                card.recycle();
+            }
+        }
+        String playerTitle=text(root,"lb_details_description_title");
+        if(!playerTitle.isEmpty() && !playerTitle.equals(lastObservedPlayer)) CinemanaHistory.remember(this,playerTitle,null,-1,0,true);
+        lastObservedPlayer = playerTitle;
+    }
     private static boolean bannerPending(Context context) {
         return PlaybackRecovery.prefs(context).getLong("cinemana_banner_until", 0) > System.currentTimeMillis();
     }
@@ -67,7 +104,7 @@ public final class CinemanaResume extends AccessibilityService {
         p.edit().putLong("cinemana_restore_until", System.currentTimeMillis() + 60000)
             .putLong("cinemana_restore_position", p.getLong("position", 0)).commit();
         if (instance == null) return; // System may bind accessibility after the home activity on boot.
-        instance.openedHistory = false;
+        instance.historySteps = 0; instance.openedHistory = false;
         instance.lastAction = 0;
         instance.automaticInputUntil = SystemClock.uptimeMillis() + 2500;
         instance.schedule(500);
@@ -99,12 +136,18 @@ public final class CinemanaResume extends AccessibilityService {
             cancel(this);
             android.widget.Toast.makeText(this, R.string.cinemana_banner_unavailable, android.widget.Toast.LENGTH_LONG).show();
         }
+        long restoreDeadline = PlaybackRecovery.prefs(this).getLong("cinemana_restore_until", 0);
+        if (restoreDeadline > 0 && restoreDeadline <= System.currentTimeMillis()) {
+            cancel(this);
+            android.widget.Toast.makeText(this, "Find the title in Cinemana History to continue", android.widget.Toast.LENGTH_LONG).show();
+        }
         boolean restoring = pending(this);
         if (restoring || bannerPending(this)) schedule(450);
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) return;
         try {
             if (!PACKAGE.contentEquals(root.getPackageName() == null ? "" : root.getPackageName())) return;
+            captureHistory(root);
             SharedPreferences p = PlaybackRecovery.prefs(this);
             if (!p.getBoolean("active", false) || !PACKAGE.equals(p.getString("package", ""))) return;
             if (bannerPending(this)) { navigateBanner(root, p); return; }
@@ -131,6 +174,12 @@ public final class CinemanaResume extends AccessibilityService {
             }
             if (!restoring || SystemClock.uptimeMillis() - lastAction < 900) return;
             String expected = p.getString("cinemana_title", "");
+            if (screen.endsWith(".SeriesActivity")) {
+                cancel(this);
+                android.widget.Toast.makeText(this, "Choose the episode to continue", android.widget.Toast.LENGTH_SHORT).show();
+                return;
+            }
+            if (expected.isEmpty() && isHistory(root)) { cancel(this); return; }
             if (!title.isEmpty()) {
                 if (sameTitle(expected, title)) clickId(root, "btn_play");
                 else stop("Cinemana opened a different title");
@@ -145,7 +194,7 @@ public final class CinemanaResume extends AccessibilityService {
                 automaticInputUntil = SystemClock.uptimeMillis() + 1000;
                 performGlobalAction(GLOBAL_ACTION_BACK); lastAction = SystemClock.uptimeMillis(); return;
             }
-            if (openedHistory || sameTitle("السجل", text(root, "title_text")) || sameTitle("History", text(root, "title_text"))) {
+            if (openedHistory || isHistory(root)) {
                 List<AccessibilityNodeInfo> cards = root.findAccessibilityNodeInfosByViewId(PACKAGE + ":id/card_title");
                 AccessibilityNodeInfo match = null;
                 int matches = 0;
@@ -155,6 +204,19 @@ public final class CinemanaResume extends AccessibilityService {
                 if (matches == 1) click(match);
                 else if (matches > 1) stop("Cinemana History has ambiguous titles");
                 for (AccessibilityNodeInfo card : cards) card.recycle();
+                if (matches == 0 && !expected.isEmpty() && historySteps++ < 20) {
+                    List<AccessibilityNodeInfo> shelves = root.findAccessibilityNodeInfosByViewId(PACKAGE + ":id/row_content");
+                    boolean scrolled = false;
+                    for (AccessibilityNodeInfo shelf : shelves) {
+                        if (!scrolled && shelf.isScrollable()) {
+                            automaticInputUntil = SystemClock.uptimeMillis() + 1000;
+                            scrolled = shelf.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD);
+                        }
+                        shelf.recycle();
+                    }
+                    lastAction = SystemClock.uptimeMillis();
+                    if (!scrolled) stop("Title not visible in Cinemana History");
+                }
             }
         } finally { root.recycle(); }
     }
@@ -241,6 +303,7 @@ public final class CinemanaResume extends AccessibilityService {
     private void stop(String reason) {
         boolean banner = bannerPending(this);
         cancel(this);
+        if (!banner) android.widget.Toast.makeText(this, "Select the title in Cinemana History to continue", android.widget.Toast.LENGTH_LONG).show();
         if (banner) android.widget.Toast.makeText(this, R.string.cinemana_banner_unavailable, android.widget.Toast.LENGTH_LONG).show();
         android.util.Log.w("TvHomeResume", reason);
     }

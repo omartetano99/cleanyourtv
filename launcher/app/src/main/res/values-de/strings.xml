@@ -48,4 +48,5 @@
     <string name="cinemana_helper_needed">Cinemana-Wiedergabe fortsetzen in den Bedienungshilfen aktivieren, um dieses Banner zu öffnen.</string>
     <string name="cinemana_banner_unavailable">Dieses Banner konnte nicht geöffnet werden. Bitte in Cinemana unter Jetzt ansehen auswählen.</string>
     <string name="home_starting">Dein Fernseher startet…</string>
+    <string name="all_apps">Apps</string>
 </resources>
